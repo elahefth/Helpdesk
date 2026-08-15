@@ -14,6 +14,7 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "check": "bun run typecheck && bun run lint && bun run test",
+    "seed:admin": "bun run --filter='@helpdesk/api' seed:admin",
     "db:generate": "bun run --filter='@helpdesk/api' db:generate",
     "db:migrate": "bun run --filter='@helpdesk/api' db:migrate",
     "db:studio": "bun run --filter='@helpdesk/api' db:studio"

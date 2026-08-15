@@ -1,4 +1,5 @@
 import { betterAuth } from "better-auth";
+import { APIError } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { USER_ROLES } from "@helpdesk/shared";
 import { env, isProduction } from "./env.ts";
@@ -24,10 +25,34 @@ export function createAuth(db: Database) {
     trustedOrigins: [env.WEB_ORIGIN],
     database: drizzleAdapter(db, { provider: "pg", schema }),
     emailAndPassword: { enabled: true },
+    databaseHooks: {
+      user: {
+        create: {
+          // Staff-only console (project-scope.md): students never log in and
+          // agents are created by an admin, so POST /sign-up/email must not
+          // mint accounts for anyone who can reach the API.
+          //
+          // The `disableSignUp` option is not used here because it also blocks
+          // server-side auth.api.signUpEmail(), leaving no way to create the
+          // first user at all. `ctx` is null (and carries no `request`) when
+          // Better Auth is called directly in-process, so this closes the HTTP
+          // endpoint while leaving a seeding path open. Better Auth documents
+          // this hook as the way to gate sign-up conditionally.
+          before: async (_user, ctx) => {
+            if (ctx?.request) {
+              throw new APIError("BAD_REQUEST", {
+                message: "Sign up is disabled",
+                code: "SIGN_UP_DISABLED",
+              });
+            }
+          },
+        },
+      },
+    },
     user: {
       additionalFields: {
-        // `input: false` so a self-registering user cannot hand themselves
-        // "admin". Values come from @helpdesk/shared so the API and the SPA
+        // `input: false` so nothing user-supplied can hand out "admin".
+        // Values come from @helpdesk/shared so the API and the SPA
         // cannot drift.
         role: {
           type: [...USER_ROLES],
