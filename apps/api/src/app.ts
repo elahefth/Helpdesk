@@ -3,17 +3,23 @@ import cors from "cors";
 import helmet from "helmet";
 import { toNodeHandler } from "better-auth/node";
 import { env } from "./env.ts";
-import { createAuth } from "./auth.ts";
+import { createAuth, type Auth } from "./auth.ts";
 import { getDb } from "./db/client.ts";
 import { requestContext } from "./middleware/request-context.ts";
+import { requireAuth } from "./middleware/require-auth.ts";
 import { errorHandler, notFoundHandler } from "./middleware/errors.ts";
 import { healthRouter } from "./routes/health.ts";
 import { ticketsRouter } from "./routes/tickets.ts";
 
+export interface CreateAppOptions {
+  /** Test seam: inject an auth instance so the guard can be exercised without Postgres. */
+  auth?: Auth;
+}
+
 /**
  * Built as a factory so tests can spin up an app without binding a port.
  */
-export function createApp(): Express {
+export function createApp(options: CreateAppOptions = {}): Express {
   const app = express();
 
   // Behind Render/Fly this is required for correct client IPs and secure
@@ -33,14 +39,20 @@ export function createApp(): Express {
   // the named splat. Mounted only when a database exists so the API still
   // boots without Postgres — the 404 handler covers /api/auth until then.
   const db = getDb();
-  if (db) {
-    app.all("/api/auth/*splat", toNodeHandler(createAuth(db)));
+  const auth = options.auth ?? (db ? createAuth(db) : undefined);
+  if (auth) {
+    app.all("/api/auth/*splat", toNodeHandler(auth));
   }
 
   app.use(express.json({ limit: "1mb" }));
 
+  // Public: the platform gates traffic on these and the SPA polls /readyz from
+  // its login screen, before anyone has a session.
   app.use(healthRouter);
-  app.use("/api", ticketsRouter);
+
+  // Everything else under /api is staff-only. The auth routes above already
+  // terminated their own responses, so they never reach this guard.
+  app.use("/api", requireAuth(auth), ticketsRouter);
 
   // Order matters: 404 catch-all, then the error handler, both last.
   app.use(notFoundHandler);

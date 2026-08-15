@@ -3,6 +3,8 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createBrowserRouter } from "react-router";
 import { AppLayout } from "./AppLayout.tsx";
+import { LoginPage } from "./routes/LoginPage.tsx";
+import { RequireAuth } from "./routes/RequireAuth.tsx";
 import { TicketListPage } from "./routes/TicketListPage.tsx";
 import "./index.css";
 
@@ -16,11 +18,19 @@ const queryClient = new QueryClient({
   },
 });
 
+// /login sits outside AppLayout so the signed-out screen has no nav bar, and
+// everything else hangs off RequireAuth so a new route is protected by default.
 const router = createBrowserRouter([
+  { path: "/login", element: <LoginPage /> },
   {
-    path: "/",
-    element: <AppLayout />,
-    children: [{ index: true, element: <TicketListPage /> }],
+    element: <RequireAuth />,
+    children: [
+      {
+        path: "/",
+        element: <AppLayout />,
+        children: [{ index: true, element: <TicketListPage /> }],
+      },
+    ],
   },
 ]);
 

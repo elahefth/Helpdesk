@@ -1,6 +1,8 @@
-import { Outlet } from "react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { Outlet, useNavigate } from "react-router";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getReadiness } from "./lib/api.ts";
+import { authClient, useSession } from "./lib/auth-client.ts";
 
 function ApiStatusBadge() {
   const { data, isPending, isError } = useQuery({
@@ -31,6 +33,45 @@ function ApiStatusBadge() {
   );
 }
 
+function UserMenu() {
+  const { data: session } = useSession();
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const [isSigningOut, setIsSigningOut] = useState(false);
+
+  if (!session) return null;
+
+  const handleSignOut = async () => {
+    setIsSigningOut(true);
+    try {
+      await authClient.signOut();
+      // Drop every cached response before the next person signs in — otherwise
+      // an agent's queue is briefly visible to whoever logs in after them.
+      queryClient.clear();
+      await navigate("/login", { replace: true });
+    } finally {
+      setIsSigningOut(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-3">
+      <span className="text-sm font-medium">{session.user.name}</span>
+      <span className="rounded-full bg-neutral-100 px-2.5 py-1 text-xs font-medium text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">
+        {session.user.role}
+      </span>
+      <button
+        type="button"
+        onClick={() => void handleSignOut()}
+        disabled={isSigningOut}
+        className="rounded-md border border-neutral-300 px-2.5 py-1.5 text-sm disabled:opacity-50 dark:border-neutral-700"
+      >
+        {isSigningOut ? "Signing out…" : "Sign out"}
+      </button>
+    </div>
+  );
+}
+
 export function AppLayout() {
   return (
     <div className="min-h-full bg-white text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
@@ -42,7 +83,10 @@ export function AppLayout() {
               AI drafts. The agent decides.
             </p>
           </div>
-          <ApiStatusBadge />
+          <div className="flex items-center gap-4">
+            <ApiStatusBadge />
+            <UserMenu />
+          </div>
         </div>
       </header>
       <main className="mx-auto max-w-6xl px-6 py-8">
