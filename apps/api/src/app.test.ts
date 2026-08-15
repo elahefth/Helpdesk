@@ -34,6 +34,8 @@ describe("health", () => {
     expect(typeof payload.uptimeSeconds).toBe("number");
   });
 
+  // The root `test` script runs with --env-file=/dev/null so this premise
+  // holds regardless of the developer's local .env.
   it("reports degraded readiness when no database is configured", async () => {
     const res = await get("/readyz");
     expect(res.status).toBe(503);

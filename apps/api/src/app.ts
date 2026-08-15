@@ -1,7 +1,10 @@
 import express, { type Express } from "express";
 import cors from "cors";
 import helmet from "helmet";
+import { toNodeHandler } from "better-auth/node";
 import { env } from "./env.ts";
+import { createAuth } from "./auth.ts";
+import { getDb } from "./db/client.ts";
 import { requestContext } from "./middleware/request-context.ts";
 import { errorHandler, notFoundHandler } from "./middleware/errors.ts";
 import { healthRouter } from "./routes/health.ts";
@@ -20,8 +23,21 @@ export function createApp(): Express {
 
   app.use(helmet());
   app.use(cors({ origin: env.WEB_ORIGIN, credentials: true }));
-  app.use(express.json({ limit: "1mb" }));
+
+  // Above the auth mount so /api/auth requests get an ID and a log line too;
+  // it never touches the body, so it is safe here.
   app.use(requestContext);
+
+  // Must sit above express.json(): Better Auth reads the raw body itself, and
+  // a consumed stream hangs the request. Express 5 rejects a bare "*", hence
+  // the named splat. Mounted only when a database exists so the API still
+  // boots without Postgres — the 404 handler covers /api/auth until then.
+  const db = getDb();
+  if (db) {
+    app.all("/api/auth/*splat", toNodeHandler(createAuth(db)));
+  }
+
+  app.use(express.json({ limit: "1mb" }));
 
   app.use(healthRouter);
   app.use("/api", ticketsRouter);
