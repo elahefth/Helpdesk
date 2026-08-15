@@ -1,0 +1,34 @@
+{
+  "name": "helpdesk",
+  "private": true,
+  "type": "module",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev": "bun run --filter='*' dev",
+    "dev:api": "bun run --filter='@helpdesk/api' dev",
+    "dev:web": "bun run --filter='@helpdesk/web' dev",
+    "build": "bun run --filter='*' build",
+    "typecheck": "bun run --filter='*' typecheck",
+    "test": "bun test",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "check": "bun run typecheck && bun run lint && bun test",
+    "db:generate": "bun run --filter='@helpdesk/api' db:generate",
+    "db:migrate": "bun run --filter='@helpdesk/api' db:migrate",
+    "db:studio": "bun run --filter='@helpdesk/api' db:studio"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/bun": "^1.3.14",
+    "eslint": "^10.8.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.9.0",
+    "prettier": "^3.9.6",
+    "typescript": "6",
+    "typescript-eslint": "^8.67.0"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  }
+}
