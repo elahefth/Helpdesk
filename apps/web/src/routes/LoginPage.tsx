@@ -1,7 +1,28 @@
-import { useState, type FormEvent } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router";
-import { useMutation } from "@tanstack/react-query";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
 import { authClient, useSession } from "../lib/auth-client.ts";
+
+/**
+ * Colocated rather than in @helpdesk/shared: that package holds the contracts
+ * *this* API builds its responses from, and `/api/auth/*` belongs to Better
+ * Auth. This schema only describes what the form collects before handing off.
+ */
+const loginSchema = z.object({
+  email: z.string().email("Enter a valid email address."),
+  password: z.string().min(1, "Enter your password."),
+});
+
+type LoginValues = z.infer<typeof loginSchema>;
+
+/** Red border on an invalid field — paired with the message, never alone. */
+const fieldClasses = (isInvalid: boolean) =>
+  `w-full rounded-md border bg-transparent px-2.5 py-1.5 text-sm ${
+    isInvalid
+      ? "border-red-500 dark:border-red-500"
+      : "border-neutral-300 dark:border-neutral-700"
+  }`;
 
 /**
  * There is no sign-up path by design: `databaseHooks.user.create.before` in
@@ -13,36 +34,40 @@ export function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-
   // Where the guard bounced us from, so a deep link survives the detour.
   const from = (location.state as { from?: string } | null)?.from ?? "/";
 
-  const signIn = useMutation({
-    mutationFn: async () => {
-      // Better Auth resolves with an `error` field rather than throwing, so it
-      // has to be rethrown for TanStack Query to see a failure.
-      const { error } = await authClient.signIn.email({ email, password });
-      if (error) {
-        throw new Error(
+  const {
+    register,
+    handleSubmit,
+    setError,
+    formState: { errors, isSubmitting },
+  } = useForm<LoginValues>({
+    resolver: zodResolver(loginSchema),
+    defaultValues: { email: "", password: "" },
+  });
+
+  const onSubmit = async (values: LoginValues) => {
+    // Better Auth resolves with an `error` field rather than throwing, so the
+    // failure has to be moved onto the form by hand.
+    const { error } = await authClient.signIn.email(values);
+
+    if (error) {
+      // Deliberately not attached to the email field: saying which half of the
+      // pair was wrong tells an attacker which addresses have accounts.
+      setError("root", {
+        message:
           error.status === 401
             ? "Invalid email or password."
             : (error.message ?? "Could not sign in. Please try again."),
-        );
-      }
-    },
-    onSuccess: () => {
-      void navigate(from, { replace: true });
-    },
-  });
+      });
+      return;
+    }
+
+    await navigate(from, { replace: true });
+  };
 
   if (session) return <Navigate to="/" replace />;
-
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    signIn.mutate();
-  };
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-white px-6 py-12 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
@@ -55,7 +80,10 @@ export function LoginPage() {
         </div>
 
         <form
-          onSubmit={handleSubmit}
+          // noValidate hands validation to Zod, so the messages match the ones
+          // the rest of the app renders instead of the browser's own bubbles.
+          noValidate
+          onSubmit={(event) => void handleSubmit(onSubmit)(event)}
           className="space-y-4 rounded-lg border border-neutral-200 p-6 dark:border-neutral-800"
         >
           <div className="space-y-1.5">
@@ -68,13 +96,21 @@ export function LoginPage() {
             <input
               id="email"
               type="email"
-              required
               autoFocus
               autoComplete="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              className="w-full rounded-md border border-neutral-300 bg-transparent px-2.5 py-1.5 text-sm dark:border-neutral-700"
+              aria-invalid={errors.email ? true : undefined}
+              aria-describedby={errors.email ? "email-error" : undefined}
+              {...register("email")}
+              className={fieldClasses(Boolean(errors.email))}
             />
+            {errors.email && (
+              <p
+                id="email-error"
+                className="text-sm text-red-700 dark:text-red-300"
+              >
+                {errors.email.message}
+              </p>
+            )}
           </div>
 
           <div className="space-y-1.5">
@@ -87,29 +123,37 @@ export function LoginPage() {
             <input
               id="password"
               type="password"
-              required
               autoComplete="current-password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              className="w-full rounded-md border border-neutral-300 bg-transparent px-2.5 py-1.5 text-sm dark:border-neutral-700"
+              aria-invalid={errors.password ? true : undefined}
+              aria-describedby={errors.password ? "password-error" : undefined}
+              {...register("password")}
+              className={fieldClasses(Boolean(errors.password))}
             />
+            {errors.password && (
+              <p
+                id="password-error"
+                className="text-sm text-red-700 dark:text-red-300"
+              >
+                {errors.password.message}
+              </p>
+            )}
           </div>
 
-          {signIn.isError && (
+          {errors.root && (
             <p
               role="alert"
               className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
             >
-              {signIn.error.message}
+              {errors.root.message}
             </p>
           )}
 
           <button
             type="submit"
-            disabled={signIn.isPending || isSessionPending}
+            disabled={isSubmitting || isSessionPending}
             className="w-full rounded-md bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-neutral-100 dark:text-neutral-900"
           >
-            {signIn.isPending ? "Signing in…" : "Sign in"}
+            {isSubmitting ? "Signing in…" : "Sign in"}
           </button>
         </form>
 
