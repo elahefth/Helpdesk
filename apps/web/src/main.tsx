@@ -4,8 +4,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createBrowserRouter } from "react-router";
 import { AppLayout } from "./AppLayout.tsx";
 import { LoginPage } from "./routes/LoginPage.tsx";
+import { RequireAdmin } from "./routes/RequireAdmin.tsx";
 import { RequireAuth } from "./routes/RequireAuth.tsx";
 import { TicketListPage } from "./routes/TicketListPage.tsx";
+import { UsersPage } from "./routes/UsersPage.tsx";
 import "./index.css";
 
 const queryClient = new QueryClient({
@@ -28,7 +30,13 @@ const router = createBrowserRouter([
       {
         path: "/",
         element: <AppLayout />,
-        children: [{ index: true, element: <TicketListPage /> }],
+        children: [
+          { index: true, element: <TicketListPage /> },
+          {
+            element: <RequireAdmin />,
+            children: [{ path: "users", element: <UsersPage /> }],
+          },
+        ],
       },
     ],
   },

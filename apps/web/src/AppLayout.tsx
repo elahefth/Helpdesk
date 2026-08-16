@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Outlet, useNavigate } from "react-router";
+import { NavLink, Outlet, useNavigate } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getReadiness } from "./lib/api.ts";
 import { authClient, useSession } from "./lib/auth-client.ts";
@@ -67,6 +67,32 @@ function UserMenu() {
   );
 }
 
+/**
+ * Admin-only links are hidden here and guarded again by `RequireAdmin` on the
+ * route — hiding the link is courtesy, the route guard is the rule. An agent
+ * who types /users still gets redirected.
+ */
+function MainNav() {
+  const { data: session } = useSession();
+
+  if (session?.user.role !== "admin") return null;
+
+  return (
+    <nav className="flex items-center gap-4 text-sm">
+      <NavLink
+        to="/users"
+        className={({ isActive }) =>
+          isActive
+            ? "font-medium text-foreground"
+            : "text-muted-foreground hover:text-foreground"
+        }
+      >
+        Users
+      </NavLink>
+    </nav>
+  );
+}
+
 export function AppLayout() {
   return (
     <div className="min-h-full bg-background text-foreground">
@@ -79,6 +105,7 @@ export function AppLayout() {
             </p>
           </div>
           <div className="flex items-center gap-4">
+            <MainNav />
             <ApiStatusBadge />
             <UserMenu />
           </div>
