@@ -66,6 +66,21 @@ export function resetDomainData(): Promise<string[]> {
   return truncateAll(AUTH_TABLES);
 }
 
+/**
+ * Deletes one session row, by token — what an admin revoking an agent will do
+ * once that screen exists, and the reason auth.ts sets no `cookieCache`.
+ *
+ * Deliberately narrow: a broader "delete this user's sessions" would also take
+ * out the storageState session the rest of the run depends on. Callers pass the
+ * token of a session they minted themselves.
+ */
+export async function deleteSessionByToken(token: string): Promise<number> {
+  const deleted = await client()`
+    delete from "session" where token = ${token} returning id
+  `;
+  return deleted.length;
+}
+
 export async function closeTestDb(): Promise<void> {
   await sql?.end({ timeout: 5 });
   sql = undefined;
