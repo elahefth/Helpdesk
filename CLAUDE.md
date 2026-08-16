@@ -36,7 +36,8 @@ bun run db:down:test   # stop it; db:reset:test to wipe and rebuild
 
 `bun run check` is deliberately unit-only. E2E needs a database and two servers, so
 it is a separate gate — run `bun run test:e2e` when you touch auth, routing, or the
-API/SPA contract.
+API/SPA contract. New Playwright specs go through the **`e2e-test-writer` agent** — see
+the E2E section under Architecture.
 
 ### Running a single test
 
@@ -112,6 +113,14 @@ The proxy target is `API_PROXY_TARGET`, defaulting to :3000. Only the E2E suite 
 ### E2E (`e2e/`) runs on Node, against a second Postgres
 
 `apps/api/src/app.test.ts` stubs auth and runs with no database. Playwright is the opposite end: the real Express app, real Better Auth, real Postgres, the SPA behind the real Vite proxy. It starts its own API on :3001 and Vite on :5174 so a running `bun run dev` neither collides with it nor is mistaken for it.
+
+**Writing a spec? Delegate to the `e2e-test-writer` agent** (`.claude/agents/e2e-test-writer.md`) rather than hand-rolling one. It already carries the harness API, the locator rules, and the traps below, so a one-line brief is enough:
+
+> Use the e2e-test-writer agent to cover the sign-out flow.
+
+Give it the behavior to cover and let it choose the assertions — it reads the route component and API handler first, and it is instructed to push back rather than invent coverage for something unimplemented. It runs what it writes, and verifies each test fails when the assertion is inverted, so treat a report that skips those steps as incomplete. Do the work inline only for a one-line tweak to an existing spec, or when the change is to the harness itself — the agent is told not to touch `playwright.config.ts`, `global-setup.ts`, or `auth.setup.ts`, and that boundary is deliberate.
+
+Keep that agent in sync when the harness changes: its fixture table and its list of what is worth covering both go stale as phases land.
 
 - **`playwright test` is a Node process, not Bun.** Nothing under `e2e/` may import `bun`'s `SQL`, which rules out `apps/api/src/db/client.ts`. Direct database access there goes through the `postgres` driver (`e2e/fixtures/db.ts`); anything needing the app's own code — migrations, Better Auth password hashing — is shelled out to a Bun subprocess in `e2e/global-setup.ts`.
 - **The test database is a separate server on :5433**, never a second database inside dev's :5432. The suite truncates whole schemas, and a separate server is what makes reaching dev data impossible rather than merely unlikely. `bun run db:up:test` provisions a local cluster in `.pgdata-test/` (`e2e/scripts/test-db.sh`); `compose.yaml` has an equivalent `postgres-test` service under the `test` profile for CI.
