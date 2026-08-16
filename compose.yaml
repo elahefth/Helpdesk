@@ -17,5 +17,42 @@ services:
       timeout: 5s
       retries: 10
 
+  # E2E only. A separate server rather than a second database inside the one
+  # above: the Playwright suite truncates whole schemas, and the safest way to
+  # guarantee that can never reach dev data is for it not to share a process.
+  #
+  # Behind a profile, so plain `docker compose up -d` still starts dev alone:
+  #   docker compose --profile test up -d postgres-test
+  postgres-test:
+    image: postgres:17-alpine
+    container_name: helpdesk-postgres-test
+    profiles: [test]
+    environment:
+      POSTGRES_USER: helpdesk
+      POSTGRES_PASSWORD: helpdesk
+      POSTGRES_DB: helpdesk_test
+    ports:
+      - "5433:5432"
+    # No named volume: the data directory lives in RAM and dies with the
+    # container. E2E data is disposable by definition.
+    tmpfs:
+      - /var/lib/postgresql/data
+    # Durability is worthless for a database that is thrown away; spend it on speed.
+    command:
+      [
+        "postgres",
+        "-c",
+        "fsync=off",
+        "-c",
+        "synchronous_commit=off",
+        "-c",
+        "full_page_writes=off",
+      ]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U helpdesk -d helpdesk_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
 volumes:
   helpdesk-pgdata:

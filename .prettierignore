@@ -3,3 +3,7 @@ dist/
 drizzle/
 bun.lock
 *.md
+e2e/playwright/.auth/
+e2e/test-results/
+e2e/playwright-report/
+e2e/blob-report/

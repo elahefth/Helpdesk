@@ -2,14 +2,21 @@
   "name": "helpdesk",
   "private": true,
   "type": "module",
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "e2e"
+  ],
   "scripts": {
     "dev": "bun run --filter='*' dev",
     "dev:api": "bun run --filter='@helpdesk/api' dev",
     "dev:web": "bun run --filter='@helpdesk/web' dev",
     "build": "bun run --filter='*' build",
     "typecheck": "bun run --filter='*' typecheck",
-    "test": "env -u DATABASE_URL -u BETTER_AUTH_SECRET bun --env-file=/dev/null test",
+    "test": "env -u DATABASE_URL -u BETTER_AUTH_SECRET bun --env-file=/dev/null test apps packages",
+    "test:e2e": "bun run --filter='@helpdesk/e2e' test",
+    "test:e2e:ui": "bun run --filter='@helpdesk/e2e' test:ui",
+    "e2e:install": "bun run --filter='@helpdesk/e2e' install:browsers",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
@@ -17,7 +24,12 @@
     "seed:admin": "bun run --filter='@helpdesk/api' seed:admin",
     "db:generate": "bun run --filter='@helpdesk/api' db:generate",
     "db:migrate": "bun run --filter='@helpdesk/api' db:migrate",
-    "db:studio": "bun run --filter='@helpdesk/api' db:studio"
+    "db:studio": "bun run --filter='@helpdesk/api' db:studio",
+    "db:up:test": "./e2e/scripts/test-db.sh up",
+    "db:down:test": "./e2e/scripts/test-db.sh down",
+    "db:reset:test": "./e2e/scripts/test-db.sh reset",
+    "db:up:test:docker": "docker compose --profile test up -d postgres-test",
+    "db:migrate:test": "bun run --filter='@helpdesk/api' db:migrate:test"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

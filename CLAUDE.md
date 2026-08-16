@@ -21,12 +21,22 @@ bun run lint           # eslint . (lint:fix to autofix)
 bun run format         # prettier --write .
 bun run test
 
-docker compose up -d postgres   # the only container; api/web run on the host
+docker compose up -d postgres   # dev Postgres; api/web run on the host
 bun run db:generate    # drizzle-kit generate after a schema change
 bun run db:migrate
 bun run db:studio
 bun run seed:admin     # -- --email=… --password=… --name=… --role=admin|agent
+
+bun run e2e:install    # one-time: download the Chromium build
+bun run db:up:test     # test Postgres on :5433 (see below)
+bun run test:e2e       # Playwright; starts its own API :3001 + Vite :5174
+bun run test:e2e:ui    # same, in the Playwright UI
+bun run db:down:test   # stop it; db:reset:test to wipe and rebuild
 ```
+
+`bun run check` is deliberately unit-only. E2E needs a database and two servers, so
+it is a separate gate — run `bun run test:e2e` when you touch auth, routing, or the
+API/SPA contract.
 
 ### Running a single test
 
@@ -36,6 +46,8 @@ The root `test` script strips `DATABASE_URL` and `BETTER_AUTH_SECRET` so the sui
 env -u DATABASE_URL -u BETTER_AUTH_SECRET bun --env-file=/dev/null test apps/api/src/app.test.ts
 env -u DATABASE_URL -u BETTER_AUTH_SECRET bun --env-file=/dev/null test -t "reopen"
 ```
+
+The root `test` script also ends in `test apps packages`, and that path filter is load-bearing: Bun's runner globs `*.spec.ts` repo-wide, so without it `bun test` collects the Playwright specs under `e2e/` and dies on `import … from "@playwright/test"`. Keep new unit tests inside `apps/` or `packages/`.
 
 `bun run dev` and the db/seed scripts load `../../.env` explicitly (`bun --env-file=../../.env`); a bare `bun src/…` from `apps/api` will not see it.
 
@@ -55,7 +67,7 @@ The implementation plan's phase numbering is still the shared vocabulary — cod
 
 ## Architecture
 
-Three workspaces: `apps/api` (Express 5), `apps/web` (React 19 SPA), `packages/shared`.
+Four workspaces: `apps/api` (Express 5), `apps/web` (React 19 SPA), `packages/shared`, and `e2e` (Playwright).
 
 ### `packages/shared` is the contract
 
@@ -94,6 +106,18 @@ Routing is defined in one place, `apps/web/src/main.tsx`. `/login` sits outside 
 These guards hide UI; they are not the security boundary — the API is. Any admin-only endpoint needs its own server-side role check (there is no `requireRole` middleware yet; `requireAuth` populates `req.user.role`).
 
 The auth client sets no `baseURL`, so requests stay same-origin: in dev Vite proxies `/api`, `/healthz`, and `/readyz` to :3000, and in production the API serves the built SPA. The session cookie therefore never needs a cross-site exemption. `inferAdditionalFields` teaches the client about `role`, using values from `@helpdesk/shared` rather than `typeof auth` because `apps/web` must not depend on `apps/api`.
+
+The proxy target is `API_PROXY_TARGET`, defaulting to :3000. Only the E2E suite overrides it — do not hardcode a port back into `vite.config.ts`.
+
+### E2E (`e2e/`) runs on Node, against a second Postgres
+
+`apps/api/src/app.test.ts` stubs auth and runs with no database. Playwright is the opposite end: the real Express app, real Better Auth, real Postgres, the SPA behind the real Vite proxy. It starts its own API on :3001 and Vite on :5174 so a running `bun run dev` neither collides with it nor is mistaken for it.
+
+- **`playwright test` is a Node process, not Bun.** Nothing under `e2e/` may import `bun`'s `SQL`, which rules out `apps/api/src/db/client.ts`. Direct database access there goes through the `postgres` driver (`e2e/fixtures/db.ts`); anything needing the app's own code — migrations, Better Auth password hashing — is shelled out to a Bun subprocess in `e2e/global-setup.ts`.
+- **The test database is a separate server on :5433**, never a second database inside dev's :5432. The suite truncates whole schemas, and a separate server is what makes reaching dev data impossible rather than merely unlikely. `bun run db:up:test` provisions a local cluster in `.pgdata-test/` (`e2e/scripts/test-db.sh`); `compose.yaml` has an equivalent `postgres-test` service under the `test` profile for CI.
+- **`.env.test` is committed** — every value in it is throwaway. Its `WEB_ORIGIN` must stay byte-identical to `baseURL` in `playwright.config.ts`: it feeds both the CORS allowlist and Better Auth's `trustedOrigins`, and both compare the `Origin` header as a string, so `localhost` and `127.0.0.1` are not interchangeable.
+- **Sessions come from the `setup` project, not the login form.** `e2e/auth.setup.ts` signs in over `/api/auth/sign-in/email` and saves cookies to `e2e/playwright/.auth/*.json`; the `chromium` project loads the admin one by default. Going through `LoginPage.tsx` would make every test's setup break whenever that markup changed. Note that project carries its own `testDir` — it lives beside the config, not in `tests/`.
+- **`workers: 1`**, because every worker shares the one database. Raising it means per-worker schemas, not a flag flip.
 
 ## Conventions
 

@@ -10,8 +10,10 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "seed:admin": "bun --env-file=../../.env src/seed.ts",
+    "seed:test": "bun --env-file=../../.env.test src/seed.ts",
     "db:generate": "bun --env-file=../../.env node_modules/.bin/drizzle-kit generate",
     "db:migrate": "bun --env-file=../../.env node_modules/.bin/drizzle-kit migrate",
+    "db:migrate:test": "bun --env-file=../../.env.test node_modules/.bin/drizzle-kit migrate",
     "db:studio": "bun --env-file=../../.env node_modules/.bin/drizzle-kit studio"
   },
   "dependencies": {

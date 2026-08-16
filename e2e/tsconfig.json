@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // Playwright's runner is Node, not Bun — @types/node, not @types/bun. That
+    // is also why nothing here may import apps/api/src/db/client.ts, which
+    // depends on bun's SQL class.
+    "lib": ["ESNext"],
+    "types": ["node"]
+  },
+  "include": ["**/*.ts"],
+  "exclude": [
+    "node_modules",
+    "test-results",
+    "playwright-report",
+    "blob-report"
+  ]
+}
