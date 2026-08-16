@@ -2,7 +2,14 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "jsx": "react-jsx",
-    "types": ["vite/client"]
+    "types": ["vite/client"],
+    // Required by shadcn/ui: its generated components import via "@/...".
+    // Mirrored in vite.config.ts so the bundler resolves them too.
+    // No baseUrl: it is deprecated in TS 6, and "paths" resolves relative to
+    // this file without it.
+    "paths": {
+      "@/*": ["./src/*"]
+    }
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"]
 }

@@ -3,6 +3,17 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { authClient, useSession } from "../lib/auth-client.ts";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Field, FieldError, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 
 /**
  * Colocated rather than in @helpdesk/shared: that package holds the contracts
@@ -15,14 +26,6 @@ const loginSchema = z.object({
 });
 
 type LoginValues = z.infer<typeof loginSchema>;
-
-/** Red border on an invalid field — paired with the message, never alone. */
-const fieldClasses = (isInvalid: boolean) =>
-  `w-full rounded-md border bg-transparent px-2.5 py-1.5 text-sm ${
-    isInvalid
-      ? "border-red-500 dark:border-red-500"
-      : "border-neutral-300 dark:border-neutral-700"
-  }`;
 
 /**
  * There is no sign-up path by design: `databaseHooks.user.create.before` in
@@ -70,94 +73,73 @@ export function LoginPage() {
   if (session) return <Navigate to="/" replace />;
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-white px-6 py-12 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
+    <div className="flex min-h-screen items-center justify-center bg-background px-6 py-12">
       <div className="w-full max-w-sm">
-        <div className="mb-8 text-center">
-          <h1 className="text-xl font-semibold tracking-tight">Helpdesk</h1>
-          <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
-            AI drafts. The agent decides.
-          </p>
-        </div>
+        <Card>
+          <CardHeader className="text-center">
+            <CardTitle className="text-xl tracking-tight">Helpdesk</CardTitle>
+            <CardDescription>AI drafts. The agent decides.</CardDescription>
+          </CardHeader>
 
-        <form
-          // noValidate hands validation to Zod, so the messages match the ones
-          // the rest of the app renders instead of the browser's own bubbles.
-          noValidate
-          onSubmit={(event) => void handleSubmit(onSubmit)(event)}
-          className="space-y-4 rounded-lg border border-neutral-200 p-6 dark:border-neutral-800"
-        >
-          <div className="space-y-1.5">
-            <label
-              htmlFor="email"
-              className="block text-sm text-neutral-500 dark:text-neutral-400"
+          <CardContent>
+            <form
+              // noValidate hands validation to Zod, so the messages match the
+              // ones the rest of the app renders instead of the browser's own
+              // bubbles.
+              noValidate
+              onSubmit={(event) => void handleSubmit(onSubmit)(event)}
+              className="space-y-4"
             >
-              Email
-            </label>
-            <input
-              id="email"
-              type="email"
-              autoFocus
-              autoComplete="email"
-              aria-invalid={errors.email ? true : undefined}
-              aria-describedby={errors.email ? "email-error" : undefined}
-              {...register("email")}
-              className={fieldClasses(Boolean(errors.email))}
-            />
-            {errors.email && (
-              <p
-                id="email-error"
-                className="text-sm text-red-700 dark:text-red-300"
+              <Field>
+                <FieldLabel htmlFor="email">Email</FieldLabel>
+                <Input
+                  id="email"
+                  type="email"
+                  autoFocus
+                  autoComplete="email"
+                  // Input styles its own invalid state off aria-invalid, so the
+                  // red border and the message stay in lockstep.
+                  aria-invalid={errors.email ? true : undefined}
+                  aria-describedby={errors.email ? "email-error" : undefined}
+                  {...register("email")}
+                />
+                <FieldError id="email-error" errors={[errors.email]} />
+              </Field>
+
+              <Field>
+                <FieldLabel htmlFor="password">Password</FieldLabel>
+                <Input
+                  id="password"
+                  type="password"
+                  autoComplete="current-password"
+                  aria-invalid={errors.password ? true : undefined}
+                  aria-describedby={
+                    errors.password ? "password-error" : undefined
+                  }
+                  {...register("password")}
+                />
+                <FieldError id="password-error" errors={[errors.password]} />
+              </Field>
+
+              {errors.root && (
+                <Alert variant="destructive">
+                  <AlertDescription>{errors.root.message}</AlertDescription>
+                </Alert>
+              )}
+
+              <Button
+                type="submit"
+                size="lg"
+                disabled={isSubmitting || isSessionPending}
+                className="w-full"
               >
-                {errors.email.message}
-              </p>
-            )}
-          </div>
+                {isSubmitting ? "Signing in…" : "Sign in"}
+              </Button>
+            </form>
+          </CardContent>
+        </Card>
 
-          <div className="space-y-1.5">
-            <label
-              htmlFor="password"
-              className="block text-sm text-neutral-500 dark:text-neutral-400"
-            >
-              Password
-            </label>
-            <input
-              id="password"
-              type="password"
-              autoComplete="current-password"
-              aria-invalid={errors.password ? true : undefined}
-              aria-describedby={errors.password ? "password-error" : undefined}
-              {...register("password")}
-              className={fieldClasses(Boolean(errors.password))}
-            />
-            {errors.password && (
-              <p
-                id="password-error"
-                className="text-sm text-red-700 dark:text-red-300"
-              >
-                {errors.password.message}
-              </p>
-            )}
-          </div>
-
-          {errors.root && (
-            <p
-              role="alert"
-              className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
-            >
-              {errors.root.message}
-            </p>
-          )}
-
-          <button
-            type="submit"
-            disabled={isSubmitting || isSessionPending}
-            className="w-full rounded-md bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-neutral-100 dark:text-neutral-900"
-          >
-            {isSubmitting ? "Signing in…" : "Sign in"}
-          </button>
-        </form>
-
-        <p className="mt-4 text-center text-xs text-neutral-500 dark:text-neutral-400">
+        <p className="mt-4 text-center text-xs text-muted-foreground">
           Staff only. Accounts are created by an administrator.
         </p>
       </div>

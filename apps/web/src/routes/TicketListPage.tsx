@@ -3,6 +3,23 @@ import { CATEGORY_LABELS, TICKET_STATUSES } from "@helpdesk/shared";
 import { useState } from "react";
 import { listTickets } from "../lib/api.ts";
 import type { TicketStatus } from "@helpdesk/shared";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Card, CardContent } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+/** Base UI's Select renders labels from `items` rather than the raw value. */
+const STATUS_ITEMS = [
+  { label: "All", value: "all" },
+  ...TICKET_STATUSES.map((value) => ({ label: value, value })),
+];
 
 /**
  * Phase 0 skeleton. It exercises the real request path — shared Zod schemas,
@@ -21,59 +38,62 @@ export function TicketListPage() {
   return (
     <section className="space-y-6">
       <div className="flex flex-wrap items-center gap-2">
-        <label
-          htmlFor="status"
-          className="text-sm text-neutral-500 dark:text-neutral-400"
-        >
+        <Label htmlFor="status" className="text-muted-foreground">
           Status
-        </label>
-        <select
-          id="status"
+        </Label>
+        <Select
+          items={STATUS_ITEMS}
           value={status}
-          onChange={(event) =>
-            setStatus(event.target.value as TicketStatus | "all")
-          }
-          className="rounded-md border border-neutral-300 bg-transparent px-2.5 py-1.5 text-sm dark:border-neutral-700"
+          onValueChange={(value) => setStatus(value as TicketStatus | "all")}
         >
-          <option value="all">All</option>
-          {TICKET_STATUSES.map((value) => (
-            <option key={value} value={value}>
-              {value}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger id="status" className="min-w-32">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {STATUS_ITEMS.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
       </div>
 
       {isPending && (
-        <p className="text-sm text-neutral-500 dark:text-neutral-400">
-          Loading tickets…
-        </p>
+        <p className="text-sm text-muted-foreground">Loading tickets…</p>
       )}
 
       {isError && (
-        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
-          Could not load tickets: {(error as Error).message}
-        </div>
+        <Alert variant="destructive">
+          <AlertTitle>Could not load tickets</AlertTitle>
+          <AlertDescription>{(error as Error).message}</AlertDescription>
+        </Alert>
       )}
 
       {data && data.data.length === 0 && (
-        <div className="rounded-lg border border-dashed border-neutral-300 p-10 text-center dark:border-neutral-700">
-          <p className="font-medium">No tickets yet</p>
-          <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
-            Seed the corpus (plan phase 3) or run the ingestion pipeline
-            (phase 5) to populate the queue.
-          </p>
-        </div>
+        <Card className="border-dashed">
+          <CardContent className="py-10 text-center">
+            <p className="font-medium">No tickets yet</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Seed the corpus (plan phase 3) or run the ingestion pipeline
+              (phase 5) to populate the queue.
+            </p>
+          </CardContent>
+        </Card>
       )}
 
       {data && data.data.length > 0 && (
-        <ul className="divide-y divide-neutral-200 dark:divide-neutral-800">
+        <ul className="divide-y">
           {data.data.map((ticket) => (
             <li key={ticket.id} className="py-3">
               <p className="font-medium">{ticket.subject}</p>
-              <p className="text-sm text-neutral-500 dark:text-neutral-400">
+              <p className="text-sm text-muted-foreground">
                 {ticket.studentEmail} · {ticket.status} ·{" "}
-                {ticket.category ? CATEGORY_LABELS[ticket.category] : "unclassified"}
+                {ticket.category
+                  ? CATEGORY_LABELS[ticket.category]
+                  : "unclassified"}
               </p>
             </li>
           ))}

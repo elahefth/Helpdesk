@@ -3,6 +3,8 @@ import { Outlet, useNavigate } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getReadiness } from "./lib/api.ts";
 import { authClient, useSession } from "./lib/auth-client.ts";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 
 function ApiStatusBadge() {
   const { data, isPending, isError } = useQuery({
@@ -19,18 +21,14 @@ function ApiStatusBadge() {
       ? "database down"
       : "ready";
 
-  const tone =
+  const variant =
     label === "ready"
-      ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200"
+      ? "outline"
       : label === "checking…"
-        ? "bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300"
-        : "bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200";
+        ? "secondary"
+        : "destructive";
 
-  return (
-    <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${tone}`}>
-      API: {label}
-    </span>
-  );
+  return <Badge variant={variant}>API: {label}</Badge>;
 }
 
 function UserMenu() {
@@ -57,29 +55,26 @@ function UserMenu() {
   return (
     <div className="flex items-center gap-3">
       <span className="text-sm font-medium">{session.user.name}</span>
-      <span className="rounded-full bg-neutral-100 px-2.5 py-1 text-xs font-medium text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">
-        {session.user.role}
-      </span>
-      <button
-        type="button"
+      <Badge variant="secondary">{session.user.role}</Badge>
+      <Button
+        variant="outline"
         onClick={() => void handleSignOut()}
         disabled={isSigningOut}
-        className="rounded-md border border-neutral-300 px-2.5 py-1.5 text-sm disabled:opacity-50 dark:border-neutral-700"
       >
         {isSigningOut ? "Signing out…" : "Sign out"}
-      </button>
+      </Button>
     </div>
   );
 }
 
 export function AppLayout() {
   return (
-    <div className="min-h-full bg-white text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
-      <header className="border-b border-neutral-200 dark:border-neutral-800">
+    <div className="min-h-full bg-background text-foreground">
+      <header className="border-b">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-4">
           <div>
             <h1 className="text-lg font-semibold tracking-tight">Helpdesk</h1>
-            <p className="text-sm text-neutral-500 dark:text-neutral-400">
+            <p className="text-sm text-muted-foreground">
               AI drafts. The agent decides.
             </p>
           </div>

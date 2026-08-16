@@ -17,7 +17,7 @@ export function RequireAuth() {
   // bounce an authenticated user to the login screen on every refresh.
   if (isPending) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-white text-sm text-neutral-500 dark:bg-neutral-950 dark:text-neutral-400">
+      <div className="flex min-h-screen items-center justify-center bg-background text-sm text-muted-foreground">
         Loading…
       </div>
     );
