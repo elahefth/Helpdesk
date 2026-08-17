@@ -41,6 +41,17 @@ export const userSchema = z.object({
 });
 export type User = z.infer<typeof userSchema>;
 
+/**
+ * A staff row in the admin user list. `emailVerified` is deliberately absent:
+ * HTTP sign-up is closed and the seed script never sets it, so it is `false` for
+ * every row that can exist — surfacing it would tell an admin their whole team
+ * is unverified.
+ */
+export const userSummarySchema = userSchema.extend({
+  createdAt: z.string().datetime(),
+});
+export type UserSummary = z.infer<typeof userSummarySchema>;
+
 export const messageSchema = z.object({
   id: z.string().uuid(),
   direction: messageDirectionSchema,
@@ -90,3 +101,25 @@ export const listTicketsResponseSchema = z.object({
   nextCursor: z.string().nullable(),
 });
 export type ListTicketsResponse = z.infer<typeof listTicketsResponseSchema>;
+
+/**
+ * Query params for GET /api/users. Admin-only; parsed with this on the server.
+ *
+ * No `sort`/`order` pair, unlike the ticket list: the order is fixed at
+ * `email asc`. `email` is the only NOT NULL UNIQUE column on the user table, so
+ * it is a total order on its own and its unique index already provides the sort
+ * — which is what makes the keyset cursor a single opaque string. `createdAt`
+ * has no index and cannot get one without hand-editing generated auth schema.
+ */
+export const listUsersQuerySchema = z.object({
+  role: userRoleSchema.optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+  cursor: z.string().optional(),
+});
+export type ListUsersQuery = z.infer<typeof listUsersQuerySchema>;
+
+export const listUsersResponseSchema = z.object({
+  data: z.array(userSummarySchema),
+  nextCursor: z.string().nullable(),
+});
+export type ListUsersResponse = z.infer<typeof listUsersResponseSchema>;

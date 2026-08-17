@@ -1,9 +1,12 @@
 import {
   apiErrorSchema,
   listTicketsResponseSchema,
+  listUsersResponseSchema,
   readinessSchema,
   type ListTicketsQuery,
   type ListTicketsResponse,
+  type ListUsersQuery,
+  type ListUsersResponse,
   type Readiness,
 } from "@helpdesk/shared";
 
@@ -57,16 +60,31 @@ export function getReadiness(): Promise<Readiness> {
   return request("/readyz", readinessSchema);
 }
 
-export function listTickets(
-  query: Partial<ListTicketsQuery> = {},
-): Promise<ListTicketsResponse> {
+/**
+ * Skips undefined so a caller can spread an optional filter in without the
+ * string "undefined" reaching the API's Zod parse as a value.
+ */
+function toQueryString(query: Record<string, unknown>): string {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {
     if (value !== undefined) params.set(key, String(value));
   }
   const qs = params.toString();
+  return qs ? `?${qs}` : "";
+}
+
+export function listTickets(
+  query: Partial<ListTicketsQuery> = {},
+): Promise<ListTicketsResponse> {
   return request(
-    `/api/tickets${qs ? `?${qs}` : ""}`,
+    `/api/tickets${toQueryString(query)}`,
     listTicketsResponseSchema,
   );
+}
+
+/** Admin-only server-side; a non-admin session gets a 403 here, not a redirect. */
+export function listUsers(
+  query: Partial<ListUsersQuery> = {},
+): Promise<ListUsersResponse> {
+  return request(`/api/users${toQueryString(query)}`, listUsersResponseSchema);
 }

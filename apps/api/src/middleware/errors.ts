@@ -30,6 +30,15 @@ export class HttpError extends Error {
   static forbidden(message = "Insufficient permissions") {
     return new HttpError(403, "forbidden", message);
   }
+
+  /**
+   * For a dependency the API is designed to boot without — a route that needs
+   * Postgres when `getDb()` returned undefined. Distinct from 500: the request
+   * was well-formed and may succeed on retry.
+   */
+  static serviceUnavailable(message = "Service unavailable") {
+    return new HttpError(503, "service_unavailable", message);
+  }
 }
 
 export function notFoundHandler(req: Request, res: Response): void {

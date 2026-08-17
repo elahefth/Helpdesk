@@ -7,28 +7,41 @@ import { canTransition } from "@helpdesk/shared";
 let server: Server;
 let baseUrl: string;
 
+/** The two identities the stub can resolve to, keyed by session cookie value. */
+const STUB_USERS = {
+  agent: {
+    id: "00000000-0000-4000-8000-000000000001",
+    email: "agent@helpdesk.test",
+    name: "Test Agent",
+    role: "agent",
+  },
+  admin: {
+    id: "00000000-0000-4000-8000-000000000002",
+    email: "admin@helpdesk.test",
+    name: "Test Admin",
+    role: "admin",
+  },
+} as const;
+
 /**
  * The root `test` script runs with `-u DATABASE_URL`, so the real auth instance
  * cannot be built. This stub stands in for it: any request carrying a cookie is
  * treated as signed in, so the guard's two branches are both reachable without
  * a database.
+ *
+ * The cookie *value* selects the role, which is what makes `requireRole` testable
+ * without Postgres. Anything unrecognised resolves to `agent`, so the plain
+ * `getAuthed` helper keeps the least-privileged identity it has always had.
  */
 const stubAuth = {
   handler: () => new Response(null, { status: 404 }),
   api: {
-    getSession: ({ headers }: { headers: Headers }) =>
-      Promise.resolve(
-        headers.get("cookie")
-          ? {
-              user: {
-                id: "00000000-0000-4000-8000-000000000001",
-                email: "agent@helpdesk.test",
-                name: "Test Agent",
-                role: "agent",
-              },
-            }
-          : null,
-      ),
+    getSession: ({ headers }: { headers: Headers }) => {
+      const cookie = headers.get("cookie");
+      if (!cookie) return Promise.resolve(null);
+      const role = /helpdesk\.session=admin\b/.test(cookie) ? "admin" : "agent";
+      return Promise.resolve({ user: STUB_USERS[role] });
+    },
   },
 } as unknown as Auth;
 
@@ -49,9 +62,15 @@ afterAll(() => {
 /** Unauthenticated. */
 const get = (path: string) => fetch(`${baseUrl}${path}`);
 
-/** Signed in — the stub only checks that a cookie is present. */
+/** Signed in as an agent — the stub maps any unrecognised cookie value to that. */
 const getAuthed = (path: string) =>
   fetch(`${baseUrl}${path}`, { headers: { cookie: "helpdesk.session=stub" } });
+
+/** Signed in as a specific role, for the admin-only routes. */
+const getAuthedAs = (role: keyof typeof STUB_USERS, path: string) =>
+  fetch(`${baseUrl}${path}`, {
+    headers: { cookie: `helpdesk.session=${role}` },
+  });
 
 /** `Response.json()` is `unknown`; tests assert on shape deliberately. */
 const body = (res: Response) => res.json() as Promise<any>;
@@ -103,6 +122,59 @@ describe("tickets", () => {
     expect(payload.error.code).toBe("not_found");
     expect(payload.error.requestId).toBeTruthy();
     expect(res.headers.get("x-request-id")).toBeTruthy();
+  });
+});
+
+describe("users (admin only)", () => {
+  it("rejects an unauthenticated request", async () => {
+    const res = await get("/api/users");
+    expect(res.status).toBe(401);
+    expect((await body(res)).error.code).toBe("unauthorized");
+  });
+
+  // The role gate runs before the handler touches the database, which is the only
+  // reason this is reachable in a suite that has no Postgres.
+  it("forbids an agent", async () => {
+    const res = await getAuthedAs("agent", "/api/users");
+    expect(res.status).toBe(403);
+    expect((await body(res)).error.code).toBe("forbidden");
+  });
+
+  it("does not turn an unknown /api path into a 403", async () => {
+    // Regression guard for mounting requireRole with router.use instead of on the
+    // route: that would shadow notFoundHandler for every non-admin.
+    const res = await getAuthedAs("agent", "/api/nope");
+    expect(res.status).toBe(404);
+    expect((await body(res)).error.code).toBe("not_found");
+  });
+
+  it("admits an admin as far as the database check", async () => {
+    const res = await getAuthedAs("admin", "/api/users");
+    expect(res.status).toBe(503);
+    expect((await body(res)).error.code).toBe("service_unavailable");
+  });
+
+  it("rejects an invalid role filter", async () => {
+    const res = await getAuthedAs("admin", "/api/users?role=wizard");
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  it("rejects an out-of-range limit", async () => {
+    const res = await getAuthedAs("admin", "/api/users?limit=0");
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  // Input validation precedes the database check deliberately, so a bad cursor
+  // reports itself rather than being masked by the 503 above.
+  it("rejects a malformed cursor", async () => {
+    const res = await getAuthedAs(
+      "admin",
+      "/api/users?cursor=not-base64-email",
+    );
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("bad_request");
   });
 });
 

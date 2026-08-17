@@ -10,6 +10,7 @@ import { requireAuth } from "./middleware/require-auth.ts";
 import { errorHandler, notFoundHandler } from "./middleware/errors.ts";
 import { healthRouter } from "./routes/health.ts";
 import { ticketsRouter } from "./routes/tickets.ts";
+import { createUsersRouter } from "./routes/users.ts";
 
 export interface CreateAppOptions {
   /** Test seam: inject an auth instance so the guard can be exercised without Postgres. */
@@ -52,7 +53,12 @@ export function createApp(options: CreateAppOptions = {}): Express {
 
   // Everything else under /api is staff-only. The auth routes above already
   // terminated their own responses, so they never reach this guard.
-  app.use("/api", requireAuth(auth), ticketsRouter);
+  //
+  // Both routers share the one requireAuth rather than getting an app.use each:
+  // a request that fell through the first router would otherwise pay for a
+  // second session lookup. Admin-only routes carry their own requireRole
+  // internally, so the gate here stays "any signed-in staff".
+  app.use("/api", requireAuth(auth), ticketsRouter, createUsersRouter(db));
 
   // Order matters: 404 catch-all, then the error handler, both last.
   app.use(notFoundHandler);

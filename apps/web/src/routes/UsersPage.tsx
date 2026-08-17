@@ -1,8 +1,169 @@
-/** Admin-only. Heading placeholder; the user table lands with the admin CRUD. */
+import { useInfiniteQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { USER_ROLES, type UserRole } from "@helpdesk/shared";
+import { listUsers } from "../lib/api.ts";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+/** Base UI's Select renders labels from `items` rather than the raw value. */
+const ROLE_ITEMS = [
+  { label: "All", value: "all" },
+  ...USER_ROLES.map((value) => ({ label: value, value })),
+];
+
+/**
+ * Admin-only staff list. `RequireAdmin` keeps a non-admin from rendering this,
+ * but the real boundary is GET /api/users, which answers 403 on its own.
+ *
+ * The table is hand-rolled rather than a `components/ui/table` primitive: four
+ * columns of static markup do not need eight wrapper components, and Phase 7's
+ * ticket table is the screen that should decide which table layer the app adopts.
+ */
 export function UsersPage() {
+  const [role, setRole] = useState<UserRole | "all">("all");
+
+  const {
+    data,
+    isPending,
+    isError,
+    error,
+    hasNextPage,
+    fetchNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
+    queryKey: ["users", { role }],
+    queryFn: ({ pageParam }) =>
+      listUsers({
+        ...(role === "all" ? {} : { role }),
+        ...(pageParam ? { cursor: pageParam } : {}),
+      }),
+    initialPageParam: undefined as string | undefined,
+    // `nextCursor` is null on the last page; undefined is what switches
+    // hasNextPage off.
+    getNextPageParam: (last) => last.nextCursor ?? undefined,
+  });
+
+  const users = data?.pages.flatMap((page) => page.data) ?? [];
+
   return (
     <section className="space-y-6">
       <h2 className="text-2xl font-semibold tracking-tight">Users</h2>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Label htmlFor="role" className="text-muted-foreground">
+          Role
+        </Label>
+        <Select
+          items={ROLE_ITEMS}
+          value={role}
+          onValueChange={(value) => setRole(value as UserRole | "all")}
+        >
+          <SelectTrigger id="role" className="min-w-32">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {ROLE_ITEMS.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+      </div>
+
+      {isPending && (
+        <p className="text-sm text-muted-foreground">Loading users…</p>
+      )}
+
+      {isError && (
+        <Alert variant="destructive">
+          <AlertTitle>Could not load users</AlertTitle>
+          <AlertDescription>{(error as Error).message}</AlertDescription>
+        </Alert>
+      )}
+
+      {data && users.length === 0 && (
+        <Card className="border-dashed">
+          <CardContent className="py-10 text-center">
+            <p className="font-medium">No users match that filter</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Staff accounts are created with the seed script; there is no
+              sign-up.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {data && users.length > 0 && (
+        <div className="space-y-4">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b text-left text-muted-foreground">
+                  <th scope="col" className="py-2 pr-4 font-medium">
+                    Name
+                  </th>
+                  <th scope="col" className="py-2 pr-4 font-medium">
+                    Email
+                  </th>
+                  <th scope="col" className="py-2 pr-4 font-medium">
+                    Role
+                  </th>
+                  <th scope="col" className="py-2 font-medium">
+                    Added
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {users.map((user) => (
+                  <tr key={user.id}>
+                    <td className="py-3 pr-4 font-medium">{user.name}</td>
+                    <td className="py-3 pr-4 text-muted-foreground">
+                      {user.email}
+                    </td>
+                    <td className="py-3 pr-4">
+                      <Badge
+                        variant={
+                          user.role === "admin" ? "default" : "secondary"
+                        }
+                      >
+                        {user.role}
+                      </Badge>
+                    </td>
+                    <td className="py-3 text-muted-foreground">
+                      {new Date(user.createdAt).toLocaleDateString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {hasNextPage && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void fetchNextPage()}
+              disabled={isFetchingNextPage}
+            >
+              {isFetchingNextPage ? "Loading…" : "Load more"}
+            </Button>
+          )}
+        </div>
+      )}
     </section>
   );
 }
