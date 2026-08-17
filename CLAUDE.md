@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Runtime
 
-**Bun, not Node/npm.** Everything runs through `bun` — the test runner is `bun:test`, the Postgres driver is Bun's native `SQL` class, and workspace deps use `workspace:*`. TypeScript is executed directly; there is no build step in dev.
+**Bun, not Node/npm.** Everything runs through `bun` — the Postgres driver is Bun's native `SQL` class, and workspace deps use `workspace:*`. TypeScript is executed directly; there is no build step in dev. The exception is test runners: `bun:test` for `apps/api` and `packages`, **Vitest for `apps/web`** (React components), Playwright for `e2e`. See Testing below.
 
 ## Commands
 
@@ -15,11 +15,12 @@ bun run dev            # API (:3000) + Vite (:5173) together
 bun run dev:api        # either half on its own
 bun run dev:web
 
-bun run check          # typecheck → lint → test; run before finishing work
+bun run check          # typecheck → lint → test → test:web; run before finishing work
 bun run typecheck      # tsc --noEmit across all three workspaces
 bun run lint           # eslint . (lint:fix to autofix)
 bun run format         # prettier --write .
-bun run test
+bun run test           # bun:test — apps/api + packages
+bun run test:web       # Vitest — apps/web component tests
 
 docker compose up -d postgres   # dev Postgres; api/web run on the host
 bun run db:generate    # drizzle-kit generate after a schema change
@@ -48,7 +49,24 @@ env -u DATABASE_URL -u BETTER_AUTH_SECRET bun --env-file=/dev/null test apps/api
 env -u DATABASE_URL -u BETTER_AUTH_SECRET bun --env-file=/dev/null test -t "reopen"
 ```
 
-The root `test` script also ends in `test apps packages`, and that path filter is load-bearing: Bun's runner globs `*.spec.ts` repo-wide, so without it `bun test` collects the Playwright specs under `e2e/` and dies on `import … from "@playwright/test"`. Keep new unit tests inside `apps/` or `packages/`.
+The root `test` script also ends in `test apps/api packages`, and that path filter is load-bearing twice over: Bun's runner globs `*.test.ts`/`*.spec.ts` repo-wide, so a broader filter collects the Playwright specs under `e2e/` and dies on `import … from "@playwright/test"`, and it collects `apps/web`'s component tests and dies on `import … from "vitest"`. Keep new `bun:test` files inside `apps/api/` or `packages/`.
+
+### Component tests (`apps/web`) run on Vitest
+
+The SPA is the one workspace `bun test` does not own. React components need a DOM
+and the `@/…` alias, both of which Vitest gets from the Vite pipeline the app
+already builds with — under `bun:test` the same setup needs a `bunfig.toml`
+preload that registers happy-dom *and* puts Bun's native `fetch` back, or the
+`apps/api` tests lose the real `fetch` they use against an ephemeral listener.
+
+- Config is `apps/web/vitest.config.ts`, kept separate from `vite.config.ts` so a
+  test run can never be steered by `API_PROXY_TARGET`. Its
+  `include: ["src/**/*.test.{ts,tsx}"]` is the other half of the three-runner
+  boundary described above.
+- `environment: "happy-dom"`; `unstubGlobals` + `restoreMocks` clean up per test.
+- Run one file or one name: `cd apps/web && ./node_modules/.bin/vitest run src/routes/UsersPage.test.tsx`, or `-t "role=agent"`. No env stripping needed — no test here touches a database.
+- **`renderWithQuery` (`apps/web/src/test/render-with-query.tsx`) is the entry point.** It mounts the component under a throwaway `QueryClient` with `retry: false`. A fresh client per call is the point: React Query caches by key, so a shared one leaks a resolved page into the next test and makes the pending state unassertable.
+- Stub `fetch`, not `lib/api.ts`. Responses then still go through the `@helpdesk/shared` Zod schemas, so a contract drift fails the test the way it fails in the browser — see `UsersPage.test.tsx` for the queue-of-responders pattern, including the gated response that makes the loading state deterministic.
 
 `bun run dev` and the db/seed scripts load `../../.env` explicitly (`bun --env-file=../../.env`); a bare `bun src/…` from `apps/api` will not see it.
 
@@ -60,7 +78,7 @@ The root `test` script also ends in `test apps packages`, and that path filter i
 |---|---|
 | npm workspaces, Node 22 | Bun workspaces, Bun runtime |
 | `express-session` + `connect-pg-simple` + argon2 | **Better Auth** with the Drizzle adapter |
-| Vitest + Supertest | `bun:test` + `fetch` against a real ephemeral listener |
+| Vitest + Supertest | `bun:test` + `fetch` against a real ephemeral listener for the API; Vitest only for `apps/web` components |
 | shadcn/ui on Radix | shadcn/ui on **Base UI** (`@base-ui/react`) |
 | React Router 7 | React Router 8 |
 
