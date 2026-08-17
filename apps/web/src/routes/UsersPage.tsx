@@ -15,6 +15,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 
 /** Base UI's Select renders labels from `items` rather than the raw value. */
 const ROLE_ITEMS = [
@@ -84,9 +85,7 @@ export function UsersPage() {
         </Select>
       </div>
 
-      {isPending && (
-        <p className="text-sm text-muted-foreground">Loading users…</p>
-      )}
+      {isPending && <UsersTableSkeleton />}
 
       {isError && (
         <Alert variant="destructive">
@@ -111,22 +110,7 @@ export function UsersPage() {
         <div className="space-y-4">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b text-left text-muted-foreground">
-                  <th scope="col" className="py-2 pr-4 font-medium">
-                    Name
-                  </th>
-                  <th scope="col" className="py-2 pr-4 font-medium">
-                    Email
-                  </th>
-                  <th scope="col" className="py-2 pr-4 font-medium">
-                    Role
-                  </th>
-                  <th scope="col" className="py-2 font-medium">
-                    Added
-                  </th>
-                </tr>
-              </thead>
+              <UsersTableHead />
               <tbody className="divide-y">
                 {users.map((user) => (
                   <tr key={user.id}>
@@ -165,5 +149,61 @@ export function UsersPage() {
         </div>
       )}
     </section>
+  );
+}
+
+function UsersTableHead() {
+  return (
+    <thead>
+      <tr className="border-b text-left text-muted-foreground">
+        <th scope="col" className="py-2 pr-4 font-medium">
+          Name
+        </th>
+        <th scope="col" className="py-2 pr-4 font-medium">
+          Email
+        </th>
+        <th scope="col" className="py-2 pr-4 font-medium">
+          Role
+        </th>
+        <th scope="col" className="py-2 font-medium">
+          Added
+        </th>
+      </tr>
+    </thead>
+  );
+}
+
+/**
+ * Placeholder rows shaped like the real table so the header and column widths
+ * do not shift when the first page arrives. The row count is arbitrary — the
+ * API page size is 20, but five rows is enough to read as "a list is coming"
+ * without a screenful of grey bars.
+ */
+function UsersTableSkeleton() {
+  return (
+    <div className="overflow-x-auto" aria-busy="true" aria-live="polite">
+      <span className="sr-only">Loading users…</span>
+      <table className="w-full text-sm">
+        <UsersTableHead />
+        <tbody className="divide-y">
+          {Array.from({ length: 5 }, (_, i) => (
+            <tr key={i}>
+              <td className="py-3 pr-4">
+                <Skeleton className="h-4 w-32" />
+              </td>
+              <td className="py-3 pr-4">
+                <Skeleton className="h-4 w-48" />
+              </td>
+              <td className="py-3 pr-4">
+                <Skeleton className="h-5 w-16 rounded-full" />
+              </td>
+              <td className="py-3">
+                <Skeleton className="h-4 w-20" />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

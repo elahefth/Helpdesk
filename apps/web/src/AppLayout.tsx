@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router";
+import { Link, NavLink, Outlet, useNavigate } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getReadiness } from "./lib/api.ts";
 import { authClient, useSession } from "./lib/auth-client.ts";
@@ -99,7 +99,14 @@ export function AppLayout() {
       <header className="border-b">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-4">
           <div>
-            <h1 className="text-lg font-semibold tracking-tight">Helpdesk</h1>
+            <h1 className="text-lg font-semibold tracking-tight">
+              <Link
+                to="/"
+                className="rounded-sm outline-none hover:text-muted-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+              >
+                Helpdesk
+              </Link>
+            </h1>
             <p className="text-sm text-muted-foreground">
               AI drafts. The agent decides.
             </p>
