@@ -4,10 +4,12 @@ import { APIError } from "better-auth/api";
 import {
   createUserBodySchema,
   listUsersQuerySchema,
+  updateUserBodySchema,
   userSchema,
   type CreateUserBody,
   type CreateUserResponse,
   type ListUsersResponse,
+  type UpdateUserResponse,
 } from "@helpdesk/shared";
 import type { Auth } from "../auth.ts";
 import type { Database } from "../db/client.ts";
@@ -89,6 +91,76 @@ async function createStaffAccount(auth: Auth, body: CreateUserBody) {
       error.body?.message ?? error.message,
     );
   }
+}
+
+/**
+ * Sets a staff account's password, mirroring what Better Auth's own admin
+ * plugin does in `setUserPassword`: hash with the configured hasher, then write
+ * the `credential` account row.
+ *
+ * Mirrored rather than adopted. Enabling the admin plugin to reach one function
+ * would also mount /api/admin/* — set-role, ban, impersonate, list-users — on an
+ * API whose entire access story is "sign-up is closed and role is input: false".
+ * That is a far larger surface than this route needs.
+ *
+ * `auth.$context` resolves the same adapter and hasher the HTTP endpoints use,
+ * so a password set here verifies against the login form without this repo
+ * carrying a second implementation of the hash anywhere.
+ */
+async function setStaffPassword(auth: Auth, userId: string, password: string) {
+  const ctx = await auth.$context;
+  const hashed = await ctx.password.hash(password);
+  const accounts = await ctx.internalAdapter.findAccounts(userId);
+
+  // Every account this app can create gets a credential row at sign-up, so the
+  // else branch covers rows that arrived some other way. Without it
+  // `updatePassword` would match nothing and still resolve, reporting success
+  // for a password that was never stored.
+  if (accounts.some((account) => account.providerId === "credential")) {
+    await ctx.internalAdapter.updatePassword(userId, hashed);
+  } else {
+    await ctx.internalAdapter.createAccount({
+      userId,
+      providerId: "credential",
+      accountId: userId,
+      password: hashed,
+    });
+  }
+}
+
+/**
+ * Bun's driver puts the SQLSTATE on `errno` — `code` carries Bun's own
+ * "ERR_POSTGRES_SERVER_ERROR" and is identical for every server-side failure.
+ * 23505 is unique_violation, and matching the constraint name as well stops a
+ * unique index added later from reporting itself as a duplicate email.
+ *
+ * The cause chain is walked because Drizzle does not rethrow the driver's error:
+ * it wraps it in a `DrizzleQueryError` carrying the SQL and params, so the
+ * fields above are one level down. Reading them off the thrown object alone
+ * looks right, passes a driver-level probe, and turns every duplicate email
+ * into a 500 in the one place it matters. The depth cap guards a cyclic
+ * `cause`, not any shape this has actually been seen to take.
+ *
+ * Exported only so users.test.ts can pin the wrapping, which no test with a
+ * stubbed database can reach and which CI would otherwise never exercise.
+ */
+export function isDuplicateEmail(error: unknown): boolean {
+  let current: unknown = error;
+
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (typeof current !== "object" || current === null) return false;
+
+    const { errno, constraint, cause } = current as {
+      errno?: unknown;
+      constraint?: unknown;
+      cause?: unknown;
+    };
+    if (errno === "23505" && constraint === "user_email_unique") return true;
+
+    current = cause;
+  }
+
+  return false;
 }
 
 /**
@@ -210,6 +282,96 @@ export function createUsersRouter(
     };
 
     res.status(201).json(body);
+  });
+
+  /**
+   * Edit a staff account: name, email, and optionally the password.
+   *
+   * PATCH rather than PUT because the password really is optional — a body
+   * carrying only a name and email means "leave the password alone", which is a
+   * partial update rather than a replacement with a field left out.
+   */
+  router.patch("/users/:id", requireRole("admin"), async (req, res) => {
+    // A path param is untrusted input like any other. A non-UUID cannot name a
+    // row, so this could 404, but 400 tells the caller what is actually wrong —
+    // the same call `decodeCursor` makes about a malformed cursor above.
+    const id = userSchema.shape.id.safeParse(req.params.id);
+    if (!id.success) throw HttpError.badRequest("Malformed user id");
+
+    // Validation before the database check, as in the routes above. By the time
+    // this returns, a blank or whitespace-only password has already become
+    // `undefined` (see updateUserBodySchema), so "leave it alone" is one case.
+    const input = updateUserBodySchema.parse(req.body);
+
+    // Whether the password changed is worth a log line; the password is not.
+    req.log.debug(
+      { userId: id.data, passwordChanged: input.password !== undefined },
+      "updating user",
+    );
+
+    if (!db) throw HttpError.serviceUnavailable("Database unavailable");
+    if (!auth) throw HttpError.serviceUnavailable("Authentication unavailable");
+
+    // The two writes below cannot share a transaction: Better Auth's adapter
+    // holds its own handle, so `setStaffPassword` runs outside anything opened
+    // here. The order is therefore chosen for its failure mode. This way a
+    // password that fails to write leaves the name and email changed and the
+    // old password working, and re-submitting the same form converges. The
+    // reverse order fails far worse: a duplicate-email 409 after the password
+    // had already been replaced would tell the admin nothing happened, while
+    // the account's password had in fact changed and its sessions were gone.
+    //
+    // `name` and `email` are plain columns and are written with Drizzle, the
+    // way this file already reads them. Nothing caches a user row — auth.ts
+    // sets no cookieCache and no secondaryStorage — so no Better-Auth-side
+    // state goes stale behind a direct UPDATE.
+    let updated;
+    try {
+      updated = await db
+        .update(user)
+        .set({ name: input.name, email: input.email })
+        .where(eq(user.id, id.data))
+        .returning({
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          createdAt: user.createdAt,
+        });
+    } catch (error) {
+      if (!isDuplicateEmail(error)) throw error;
+      throw HttpError.conflict("A user with that email already exists.");
+    }
+
+    // Zero rows updated means no such user, so the UPDATE doubles as the
+    // existence check and there is no SELECT-then-write race to lose.
+    const row = updated[0];
+    if (!row) throw HttpError.notFound("User not found");
+
+    if (input.password !== undefined) {
+      await setStaffPassword(auth, row.id, input.password);
+
+      // A password change has to end the sessions it was meant to shut out, or
+      // an admin resetting a compromised account leaves the intruder signed in
+      // behind a multi-day cookie. Deleting the rows is enough precisely
+      // because auth.ts sets no cookieCache: every request re-reads this table,
+      // so the next one fails. It applies to the admin's own sessions too when
+      // they change their own password, which is the same bargain every other
+      // console makes.
+      await db.delete(session).where(eq(session.userId, row.id));
+    }
+
+    const body: UpdateUserResponse = {
+      id: row.id,
+      name: row.name,
+      email: row.email,
+      // Same guard as the routes above: `role` is nullable in the generated
+      // auth schema even though the column defaults to 'agent'.
+      role: row.role ?? "agent",
+      createdAt: row.createdAt.toISOString(),
+    };
+
+    res.json(body);
   });
 
   return router;

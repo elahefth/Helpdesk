@@ -5,6 +5,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { PlusIcon } from "lucide-react";
 import { createUserBodySchema, type CreateUserBody } from "@helpdesk/shared";
 import { ApiRequestError, createUser } from "../lib/api.ts";
+import { UserFormField } from "./UserFormField.tsx";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,8 +18,6 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Field, FieldError, FieldLabel } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
 
 /**
  * The "New user" button and the modal behind it, kept together so `UsersPage`
@@ -119,54 +118,30 @@ function CreateUserForm({ onCreated }: { onCreated: () => void }) {
       onSubmit={(event) => void handleSubmit(onSubmit)(event)}
       className="space-y-4"
     >
-      <Field>
-        <FieldLabel htmlFor="create-user-name">Name</FieldLabel>
-        <Input
-          id="create-user-name"
-          // The admin is filling in somebody else's details, so the browser
-          // offering their own saved name, address or password is always wrong.
-          autoComplete="off"
-          // Input styles its own invalid state off aria-invalid, so the red
-          // border and the message stay in lockstep.
-          aria-invalid={errors.name ? true : undefined}
-          aria-describedby={errors.name ? "create-user-name-error" : undefined}
-          {...register("name")}
-        />
-        <FieldError id="create-user-name-error" errors={[errors.name]} />
-      </Field>
+      <UserFormField
+        label="Name"
+        // The admin is filling in somebody else's details, so the browser
+        // offering their own saved name, address or password is always wrong.
+        autoComplete="off"
+        error={errors.name}
+        registration={register("name")}
+      />
 
-      <Field>
-        <FieldLabel htmlFor="create-user-email">Email</FieldLabel>
-        <Input
-          id="create-user-email"
-          type="email"
-          autoComplete="off"
-          aria-invalid={errors.email ? true : undefined}
-          aria-describedby={
-            errors.email ? "create-user-email-error" : undefined
-          }
-          {...register("email")}
-        />
-        <FieldError id="create-user-email-error" errors={[errors.email]} />
-      </Field>
+      <UserFormField
+        label="Email"
+        type="email"
+        autoComplete="off"
+        error={errors.email}
+        registration={register("email")}
+      />
 
-      <Field>
-        <FieldLabel htmlFor="create-user-password">Password</FieldLabel>
-        <Input
-          id="create-user-password"
-          type="password"
-          autoComplete="new-password"
-          aria-invalid={errors.password ? true : undefined}
-          aria-describedby={
-            errors.password ? "create-user-password-error" : undefined
-          }
-          {...register("password")}
-        />
-        <FieldError
-          id="create-user-password-error"
-          errors={[errors.password]}
-        />
-      </Field>
+      <UserFormField
+        label="Password"
+        type="password"
+        autoComplete="new-password"
+        error={errors.password}
+        registration={register("password")}
+      />
 
       {errors.root && (
         <Alert variant="destructive">

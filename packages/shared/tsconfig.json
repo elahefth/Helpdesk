@@ -1,4 +1,10 @@
 {
   "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Mirrors apps/api: the package is consumed as source by both the API and
+    // the SPA, but its own tests run on bun:test, so `tsc --noEmit` needs the
+    // bun globals to resolve them. @types/bun is a root devDependency.
+    "types": ["bun"]
+  },
   "include": ["src/**/*.ts"]
 }

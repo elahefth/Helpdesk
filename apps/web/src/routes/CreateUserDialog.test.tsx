@@ -222,9 +222,11 @@ describe("CreateUserDialog", () => {
     await waitFor(() =>
       expect(password.getAttribute("aria-invalid")).toBe("true"),
     );
-    // The message is wired to the input, not merely nearby.
+    // The message is wired to the input, not merely nearby. The id is generated
+    // (UserFormField calls useId, so per-row edit dialogs cannot collide), so
+    // what matters is that the link resolves to the message — not its spelling.
     const describedBy = password.getAttribute("aria-describedby");
-    expect(describedBy).toBe("create-user-password-error");
+    expect(describedBy).toBeTruthy();
     expect(document.getElementById(describedBy!)?.textContent).toBe(
       "Password must be at least 8 characters.",
     );
@@ -254,9 +256,14 @@ describe("CreateUserDialog", () => {
     expect(
       await screen.findByText("A user with that email already exists."),
     ).toBeDefined();
-    expect(
-      screen.getByLabelText("Email").getAttribute("aria-describedby"),
-    ).toBe("create-user-email-error");
+    // The server's message lands on the email field itself, not just somewhere
+    // in the form — that is what puts it under the input the admin must fix.
+    const describedBy = screen
+      .getByLabelText("Email")
+      .getAttribute("aria-describedby");
+    expect(document.getElementById(describedBy!)?.textContent).toBe(
+      "A user with that email already exists.",
+    );
     // Still open, with the values intact, so the admin can fix the one field.
     expect(screen.getByRole("dialog")).toBeDefined();
     expect(screen.getByLabelText<HTMLInputElement>("Name").value).toBe(

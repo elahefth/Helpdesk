@@ -135,9 +135,12 @@ export type ListUsersResponse = z.infer<typeof listUsersResponseSchema>;
  * promoting someone stays a separate act.
  *
  * The trims run before the length checks, so "  Al  " fails the 3-character
- * floor instead of being stored as a 2-character name. The password is not
- * trimmed: leading and trailing spaces are legitimate characters in one, and
- * silently removing them would lock the account out of its own password.
+ * floor instead of being stored as a 2-character name. The password is trimmed
+ * on the same reasoning — surrounding whitespace in one is almost always a paste
+ * artefact. Note the asymmetry that buys: the login form's schema
+ * (apps/web/src/routes/LoginPage.tsx) does not trim, so a password whose
+ * leading or trailing spaces are deliberate can be set here and then never
+ * typed back in. Trim in both places or neither; today it is only here.
  *
  * Strict, unlike the read schemas: a plain `z.object` *strips* unknown keys, so
  * a payload carrying `role: "admin"` would be accepted and quietly downgraded.
@@ -146,7 +149,15 @@ export type ListUsersResponse = z.infer<typeof listUsersResponseSchema>;
  */
 export const createUserBodySchema = z.strictObject({
   name: z.string().trim().min(3, "Name must be at least 3 characters."),
-  email: z.string().trim().email("Enter a valid email address."),
+  // Lowercased, and that is not cosmetic. Better Auth stores the address
+  // lowercased at sign-up and its `findUserByEmail` lowercases the address it
+  // is given before comparing it to the column, so a stored address carrying a
+  // capital can never be matched by any sign-in — and no password reset helps,
+  // because the lookup fails before a password is ever checked. Creating a user
+  // goes through Better Auth and is normalised for free; editing one writes the
+  // column directly, so without this an admin who types "Ada@..." locks the
+  // account out permanently.
+  email: z.string().trim().toLowerCase().email("Enter a valid email address."),
   // Better Auth enforces a floor of 8 itself; stating it here turns a rejected
   // API call into a message under the field.
   password: z.string().trim().min(8, "Password must be at least 8 characters."),
@@ -156,3 +167,48 @@ export type CreateUserBody = z.infer<typeof createUserBodySchema>;
 /** POST /api/users answers 201 with the created row, shaped like a list entry. */
 export const createUserResponseSchema = userSummarySchema;
 export type CreateUserResponse = z.infer<typeof createUserResponseSchema>;
+
+/**
+ * Body for PATCH /api/users/:id. Admin-only, and reuses `createUserBodySchema`'s
+ * own field schemas rather than restating them, so "valid name" has one
+ * definition across create and edit instead of two that drift.
+ *
+ * `role` is absent for the same reason it is absent from create: it is
+ * `input: false` on the Better Auth user model, so no payload can grant one.
+ * Editing a user therefore cannot promote them, and `strictObject` answers an
+ * attempt rather than silently dropping the field.
+ *
+ * The password is the one field that differs, and it carries the feature's
+ * central rule: **absent or blank means leave the existing password alone**.
+ * That is expressed as trim → allow-empty → transform-to-undefined rather than
+ * as a union, because a `z.union` reports a failure as "invalid input" and
+ * would replace the per-field message the form renders under the input. By the
+ * time a handler sees the parsed body, "" and "   " and omitted are all
+ * `undefined`, so the route has exactly one case to branch on.
+ */
+export const updateUserBodySchema = z.strictObject({
+  name: createUserBodySchema.shape.name,
+  email: createUserBodySchema.shape.email,
+  password: z
+    .string()
+    .trim()
+    .refine(
+      (value) => value === "" || value.length >= 8,
+      "Password must be at least 8 characters.",
+    )
+    .optional()
+    .transform((value) => (value === "" ? undefined : value)),
+});
+export type UpdateUserBody = z.infer<typeof updateUserBodySchema>;
+
+/**
+ * What the edit form holds, which is not what the API receives: the password
+ * input is always a string, and only the transform above turns a blank one into
+ * "unchanged". `useForm` is typed with this so an untouched field is "" rather
+ * than an input React would call uncontrolled.
+ */
+export type UpdateUserFormValues = z.input<typeof updateUserBodySchema>;
+
+/** PATCH /api/users/:id answers 200 with the updated row, shaped like a list entry. */
+export const updateUserResponseSchema = userSummarySchema;
+export type UpdateUserResponse = z.infer<typeof updateUserResponseSchema>;

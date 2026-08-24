@@ -73,13 +73,14 @@ const getAuthedAs = (role: keyof typeof STUB_USERS, path: string) =>
   });
 
 /** As above but for the writes. `body` is sent raw so a malformed one is testable. */
-const postAs = (
+const writeAs = (
+  method: "POST" | "PATCH",
   role: keyof typeof STUB_USERS | "anon",
   path: string,
   body: unknown,
 ) =>
   fetch(`${baseUrl}${path}`, {
-    method: "POST",
+    method,
     headers: {
       "content-type": "application/json",
       ...(role === "anon" ? {} : { cookie: `helpdesk.session=${role}` }),
@@ -87,11 +88,29 @@ const postAs = (
     body: JSON.stringify(body),
   });
 
+const postAs = (
+  role: keyof typeof STUB_USERS | "anon",
+  path: string,
+  body: unknown,
+) => writeAs("POST", role, path, body);
+
+const patchAs = (
+  role: keyof typeof STUB_USERS | "anon",
+  path: string,
+  body: unknown,
+) => writeAs("PATCH", role, path, body);
+
 const NEW_USER = {
   name: "Cass Agent",
   email: "cass@helpdesk.test",
   password: "correct-horse-battery",
 };
+
+/** A well-formed target for the edit route. No such row exists — see below. */
+const TARGET = "/api/users/00000000-0000-4000-8000-0000000000ff";
+
+/** A valid edit that changes no password. */
+const EDIT = { name: "Cass Renamed", email: "cass@helpdesk.test" };
 
 /** `Response.json()` is `unknown`; tests assert on shape deliberately. */
 const body = (res: Response) => res.json() as Promise<any>;
@@ -274,6 +293,113 @@ describe("create user (admin only)", () => {
       ...NEW_USER,
       role: "admin",
     });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+});
+
+/**
+ * Editing runs the same guard as creating and the same body rules, minus the
+ * one that differs: the password is optional, and blank means "leave it alone".
+ *
+ * As with POST, no Postgres here means a well-formed request can only be
+ * followed as far as the database check. That still pins the guard, the path
+ * param, and every branch of the body schema — the parts that must not regress
+ * quietly. The Better Auth password hand-off needs a real database and is
+ * verified against one separately.
+ */
+describe("update user (admin only)", () => {
+  it("rejects an unauthenticated request", async () => {
+    const res = await patchAs("anon", TARGET, EDIT);
+    expect(res.status).toBe(401);
+    expect((await body(res)).error.code).toBe("unauthorized");
+  });
+
+  it("forbids an agent editing staff", async () => {
+    const res = await patchAs("agent", TARGET, EDIT);
+    expect(res.status).toBe(403);
+    expect((await body(res)).error.code).toBe("forbidden");
+  });
+
+  it("admits an admin as far as the database check", async () => {
+    const res = await patchAs("admin", TARGET, EDIT);
+    expect(res.status).toBe(503);
+    expect((await body(res)).error.code).toBe("service_unavailable");
+  });
+
+  // The three ways of saying "leave the password alone" have to be equivalent,
+  // because the form sends the middle one and a scripted caller may send either
+  // of the others. Reaching the database check is what proves the body parsed.
+  it.each([
+    ["omitted", EDIT],
+    ["blank", { ...EDIT, password: "" }],
+    ["whitespace only", { ...EDIT, password: "   " }],
+  ])("accepts a password that is %s", async (_label, payload) => {
+    const res = await patchAs("admin", TARGET, payload);
+    expect(res.status).toBe(503);
+  });
+
+  it("accepts a password that is actually being changed", async () => {
+    const res = await patchAs("admin", TARGET, {
+      ...EDIT,
+      password: "correct-horse-battery",
+    });
+    expect(res.status).toBe(503);
+  });
+
+  // A path param is input too. 400 rather than 404 because the id is not merely
+  // absent from the table, it could never name a row.
+  it("rejects a malformed user id", async () => {
+    const res = await patchAs("admin", "/api/users/not-a-uuid", EDIT);
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("bad_request");
+  });
+
+  it("has no edit route without an id", async () => {
+    // Guards the ":id" on the route: a pathless patch must not fall through to
+    // something that would edit an unspecified user.
+    const res = await patchAs("admin", "/api/users", EDIT);
+    expect(res.status).toBe(404);
+    expect((await body(res)).error.code).toBe("not_found");
+  });
+
+  it("rejects a name shorter than three characters", async () => {
+    const res = await patchAs("admin", TARGET, { ...EDIT, name: "Al" });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  it("rejects a name that only reaches three characters with padding", async () => {
+    const res = await patchAs("admin", TARGET, { ...EDIT, name: " Al " });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  it("rejects a malformed email", async () => {
+    const res = await patchAs("admin", TARGET, {
+      ...EDIT,
+      email: "not-an-email",
+    });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  // A non-empty password still has to clear the floor: "unchanged" is the empty
+  // string, not any short string.
+  it("rejects a password shorter than eight characters", async () => {
+    const res = await patchAs("admin", TARGET, {
+      ...EDIT,
+      password: "1234567",
+    });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  // Same reasoning as on create: `role` is input: false on the user model, so
+  // an attempt to set one is answered rather than quietly stripped. Editing an
+  // account must not be a way to promote it.
+  it("rejects a payload that tries to hand out a role", async () => {
+    const res = await patchAs("admin", TARGET, { ...EDIT, role: "admin" });
     expect(res.status).toBe(400);
     expect((await body(res)).error.code).toBe("validation_failed");
   });

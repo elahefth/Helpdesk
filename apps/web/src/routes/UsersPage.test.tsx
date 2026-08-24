@@ -231,6 +231,55 @@ describe("UsersPage", () => {
     expect(requestedUrls).toEqual(["/api/users", "/api/users", "/api/users"]);
   });
 
+  it("offers an edit button per row, named for the user it edits", async () => {
+    responders.push(jsonResponse(pageOf([userRow(), BEN])));
+
+    renderWithQuery(<UsersPage />);
+
+    await screen.findByText("Ada Admin");
+    const editButtons = screen.getAllByRole("button", { name: /^Edit / });
+    expect(
+      editButtons.map((button) => button.getAttribute("aria-label")),
+    ).toEqual(["Edit Ada Admin", "Edit Ben Agent"]);
+  });
+
+  /**
+   * The dialog's own behaviour is covered in EditUserDialog.test.tsx. What is
+   * only observable from here is the same seam the create test pins: the
+   * invalidation has to name a prefix that matches this page's
+   * ["users", { role }] entry, or the edit lands and the table keeps showing
+   * the old row.
+   */
+  it("shows an edited user without a manual reload", async () => {
+    responders.push(
+      jsonResponse(pageOf([userRow(), BEN])),
+      // PATCH /api/users/:id
+      jsonResponse({ ...BEN, name: "Ben Renamed" }),
+      // The refetch the invalidation triggers.
+      jsonResponse(pageOf([userRow(), { ...BEN, name: "Ben Renamed" }])),
+    );
+
+    const user = userEvent.setup();
+    renderWithQuery(<UsersPage />);
+    await screen.findByText("Ben Agent");
+
+    await user.click(screen.getByRole("button", { name: "Edit Ben Agent" }));
+    const name = await screen.findByLabelText("Name");
+    await user.clear(name);
+    await user.type(name, "Ben Renamed");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(await screen.findByText("Ben Renamed")).toBeDefined();
+    expect(screen.queryByText("Ben Agent")).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // The middle call is the edit itself, addressed to the row's own id.
+    expect(requestedUrls).toEqual([
+      "/api/users",
+      `/api/users/${BEN.id}`,
+      "/api/users",
+    ]);
+  });
+
   it("refetches with role=agent when the filter changes", async () => {
     responders.push(
       jsonResponse(pageOf([userRow(), BEN])),

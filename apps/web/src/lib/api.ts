@@ -4,6 +4,7 @@ import {
   listTicketsResponseSchema,
   listUsersResponseSchema,
   readinessSchema,
+  updateUserResponseSchema,
   type CreateUserBody,
   type CreateUserResponse,
   type ListTicketsQuery,
@@ -11,6 +12,8 @@ import {
   type ListUsersQuery,
   type ListUsersResponse,
   type Readiness,
+  type UpdateUserBody,
+  type UpdateUserResponse,
 } from "@helpdesk/shared";
 
 /**
@@ -102,4 +105,24 @@ export function createUser(body: CreateUserBody): Promise<CreateUserResponse> {
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+/**
+ * Admin-only, like the rest of the user routes. `body.password` is optional and
+ * `JSON.stringify` drops an undefined one entirely, which is exactly the wire
+ * shape the API reads as "leave the existing password alone" — so a blank
+ * password field never has to be special-cased here.
+ *
+ * The id is encoded even though it is a UUID this API itself issued: the cost
+ * is nothing and it keeps a future non-UUID identifier from splitting the path.
+ */
+export function updateUser(
+  id: string,
+  body: UpdateUserBody,
+): Promise<UpdateUserResponse> {
+  return request(
+    `/api/users/${encodeURIComponent(id)}`,
+    updateUserResponseSchema,
+    { method: "PATCH", body: JSON.stringify(body) },
+  );
 }

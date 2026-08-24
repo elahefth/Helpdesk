@@ -3,6 +3,7 @@ import { useState } from "react";
 import { USER_ROLES, type UserRole } from "@helpdesk/shared";
 import { listUsers } from "../lib/api.ts";
 import { CreateUserDialog } from "./CreateUserDialog.tsx";
+import { EditUserDialog } from "./EditUserDialog.tsx";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -131,8 +132,11 @@ export function UsersPage() {
                         {user.role}
                       </Badge>
                     </td>
-                    <td className="py-3 text-muted-foreground">
+                    <td className="py-3 pr-4 text-muted-foreground">
                       {new Date(user.createdAt).toLocaleDateString()}
+                    </td>
+                    <td className="py-3 text-right">
+                      <EditUserDialog user={user} />
                     </td>
                   </tr>
                 ))}
@@ -169,8 +173,16 @@ function UsersTableHead() {
         <th scope="col" className="py-2 pr-4 font-medium">
           Role
         </th>
-        <th scope="col" className="py-2 font-medium">
+        <th scope="col" className="py-2 pr-4 font-medium">
           Added
+        </th>
+        {/*
+         * A column of icon buttons has no useful heading, but an empty <th>
+         * leaves the row-header count out of step with the cells for a screen
+         * reader walking the table. The label is there and hidden.
+         */}
+        <th scope="col" className="py-2 font-medium">
+          <span className="sr-only">Actions</span>
         </th>
       </tr>
     </thead>
@@ -201,8 +213,11 @@ function UsersTableSkeleton() {
               <td className="py-3 pr-4">
                 <Skeleton className="h-5 w-16 rounded-full" />
               </td>
-              <td className="py-3">
+              <td className="py-3 pr-4">
                 <Skeleton className="h-4 w-20" />
+              </td>
+              <td className="py-3">
+                <Skeleton className="ml-auto size-8 rounded-md" />
               </td>
             </tr>
           ))}
