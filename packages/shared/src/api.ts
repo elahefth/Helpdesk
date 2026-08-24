@@ -149,7 +149,7 @@ export const createUserBodySchema = z.strictObject({
   email: z.string().trim().email("Enter a valid email address."),
   // Better Auth enforces a floor of 8 itself; stating it here turns a rejected
   // API call into a message under the field.
-  password: z.string().min(8, "Password must be at least 8 characters."),
+  password: z.string().trim().min(8, "Password must be at least 8 characters."),
 });
 export type CreateUserBody = z.infer<typeof createUserBodySchema>;
 
