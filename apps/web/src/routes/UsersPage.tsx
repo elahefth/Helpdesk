@@ -3,6 +3,7 @@ import { useState } from "react";
 import { USER_ROLES, type UserRole } from "@helpdesk/shared";
 import { listUsers } from "../lib/api.ts";
 import { CreateUserDialog } from "./CreateUserDialog.tsx";
+import { DeleteUserDialog } from "./DeleteUserDialog.tsx";
 import { EditUserDialog } from "./EditUserDialog.tsx";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -136,7 +137,18 @@ export function UsersPage() {
                       {new Date(user.createdAt).toLocaleDateString()}
                     </td>
                     <td className="py-3 text-right">
-                      <EditUserDialog user={user} />
+                      <div className="flex justify-end gap-1">
+                        <EditUserDialog user={user} />
+                        {/*
+                         * Admins have no delete button rather than a disabled
+                         * one: a control that can never become enabled is
+                         * noise, and the API refuses an admin regardless — the
+                         * button's absence is a hint, not the rule.
+                         */}
+                        {user.role !== "admin" && (
+                          <DeleteUserDialog user={user} />
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -217,7 +229,10 @@ function UsersTableSkeleton() {
                 <Skeleton className="h-4 w-20" />
               </td>
               <td className="py-3">
-                <Skeleton className="ml-auto size-8 rounded-md" />
+                <div className="flex justify-end gap-1">
+                  <Skeleton className="size-8 rounded-md" />
+                  <Skeleton className="size-8 rounded-md" />
+                </div>
               </td>
             </tr>
           ))}

@@ -1,12 +1,14 @@
 import {
   apiErrorSchema,
   createUserResponseSchema,
+  deleteUserResponseSchema,
   listTicketsResponseSchema,
   listUsersResponseSchema,
   readinessSchema,
   updateUserResponseSchema,
   type CreateUserBody,
   type CreateUserResponse,
+  type DeleteUserResponse,
   type ListTicketsQuery,
   type ListTicketsResponse,
   type ListUsersQuery,
@@ -124,5 +126,19 @@ export function updateUser(
     `/api/users/${encodeURIComponent(id)}`,
     updateUserResponseSchema,
     { method: "PATCH", body: JSON.stringify(body) },
+  );
+}
+
+/**
+ * Admin-only, and a soft delete: the row is marked, not removed. The API
+ * refuses to delete an admin account, so a 403 here is a policy answer rather
+ * than a session problem — the caller is an admin or it would not have got a
+ * list to click from.
+ */
+export function deleteUser(id: string): Promise<DeleteUserResponse> {
+  return request(
+    `/api/users/${encodeURIComponent(id)}`,
+    deleteUserResponseSchema,
+    { method: "DELETE" },
   );
 }

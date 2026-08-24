@@ -280,6 +280,63 @@ describe("UsersPage", () => {
     ]);
   });
 
+  /**
+   * The admin exemption, as the table applies it. Hiding the button is not what
+   * enforces it — DELETE /api/users/:id refuses an admin on its own — but a
+   * delete control on a row that can never be deleted is a promise the API
+   * breaks, so the row must not offer one.
+   */
+  it("offers a delete button for agents but not for admins", async () => {
+    responders.push(jsonResponse(pageOf([userRow(), BEN])));
+
+    renderWithQuery(<UsersPage />);
+    await screen.findByText("Ada Admin");
+
+    const ada = screen.getByRole("row", { name: /Ada Admin/ });
+    const ben = screen.getByRole("row", { name: /Ben Agent/ });
+
+    // Both rows stay editable; only deletion is withheld.
+    expect(
+      within(ada).getByRole("button", { name: "Edit Ada Admin" }),
+    ).toBeDefined();
+    expect(within(ada).queryByRole("button", { name: /^Delete / })).toBeNull();
+    expect(
+      within(ben).getByRole("button", { name: "Delete Ben Agent" }),
+    ).toBeDefined();
+  });
+
+  /**
+   * As with create and edit, the seam only observable from here: the deletion
+   * has to invalidate a key prefix that matches this page's ["users", { role }]
+   * entry, or the row stays on screen until a manual reload.
+   */
+  it("drops a deleted user without a manual reload", async () => {
+    responders.push(
+      jsonResponse(pageOf([userRow(), BEN])),
+      // DELETE /api/users/:id
+      jsonResponse({ id: BEN.id, deletedAt: "2026-08-24T09:00:00.000Z" }),
+      // The refetch the invalidation triggers — Ben is gone from the list.
+      jsonResponse(pageOf([userRow()])),
+    );
+
+    const user = userEvent.setup();
+    renderWithQuery(<UsersPage />);
+    await screen.findByText("Ben Agent");
+
+    await user.click(screen.getByRole("button", { name: "Delete Ben Agent" }));
+    await screen.findByRole("alertdialog");
+    await user.click(screen.getByRole("button", { name: "Delete user" }));
+
+    await waitFor(() => expect(screen.queryByText("Ben Agent")).toBeNull());
+    expect(screen.getByText("Ada Admin")).toBeDefined();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(requestedUrls).toEqual([
+      "/api/users",
+      `/api/users/${BEN.id}`,
+      "/api/users",
+    ]);
+  });
+
   it("refetches with role=agent when the filter changes", async () => {
     responders.push(
       jsonResponse(pageOf([userRow(), BEN])),

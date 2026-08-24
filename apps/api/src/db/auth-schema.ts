@@ -22,6 +22,7 @@ export const user = pgTable("user", {
     .$onUpdate(() => /* @__PURE__ */ new Date())
     .notNull(),
   role: text("role", { enum: ["admin", "agent"] }).default("agent"),
+  deletedAt: timestamp("deleted_at"),
 });
 
 export const session = pgTable(

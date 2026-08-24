@@ -8,6 +8,7 @@ import {
   userSchema,
   type CreateUserBody,
   type CreateUserResponse,
+  type DeleteUserResponse,
   type ListUsersResponse,
   type UpdateUserResponse,
 } from "@helpdesk/shared";
@@ -66,7 +67,11 @@ function decodeCursor(cursor: string): string {
  *    instead of an error — its account-enumeration defence, and exactly wrong for
  *    an admin console, which would report success and create nothing.
  */
-async function createStaffAccount(auth: Auth, body: CreateUserBody) {
+async function createStaffAccount(
+  auth: Auth,
+  db: Database,
+  body: CreateUserBody,
+) {
   try {
     return await auth.api.signUpEmail({
       body: { name: body.name, email: body.email, password: body.password },
@@ -82,7 +87,7 @@ async function createStaffAccount(auth: Auth, body: CreateUserBody) {
     // same thing to an admin, and Better Auth has changed which one sign-up
     // raises before. The prefix covers both without pinning the version.
     if (code.startsWith("USER_ALREADY_EXISTS")) {
-      throw HttpError.conflict("A user with that email already exists.");
+      throw await emailConflict(db, body.email);
     }
 
     throw new HttpError(
@@ -91,6 +96,30 @@ async function createStaffAccount(auth: Auth, body: CreateUserBody) {
       error.body?.message ?? error.message,
     );
   }
+}
+
+/**
+ * Builds the 409 for a colliding email, distinguishing the case that soft
+ * deletion creates: `user.email` is still UNIQUE, so a deleted account keeps its
+ * address reserved even though it appears in no list. Without this the admin is
+ * told the address is taken by a user they cannot find anywhere, which reads as
+ * a bug in the list rather than as the consequence of a deletion they performed.
+ *
+ * The lookup only runs on the failure path, and the address is already
+ * lowercased by the shared schema, so it matches the stored column directly.
+ */
+async function emailConflict(db: Database, email: string): Promise<HttpError> {
+  const [existing] = await db
+    .select({ deletedAt: user.deletedAt })
+    .from(user)
+    .where(eq(user.email, email))
+    .limit(1);
+
+  return HttpError.conflict(
+    existing?.deletedAt
+      ? "That email belongs to a deleted user."
+      : "A user with that email already exists.",
+  );
 }
 
 /**
@@ -201,6 +230,10 @@ export function createUsersRouter(
       .from(user)
       .where(
         and(
+          // Soft-deleted staff are not "a user you cannot see"; they are gone.
+          // Every read in this file carries this, so a row that is marked is
+          // absent from the list, unfetchable, and uneditable by the same rule.
+          isNull(user.deletedAt),
           after ? gt(user.email, after) : undefined,
           // A NULL role has to match the "agent" filter, because that is how the
           // projection below renders it. Filtering with a bare equality would
@@ -261,7 +294,7 @@ export function createUsersRouter(
     // asserting past it, and the failure mode matches the missing database.
     if (!auth) throw HttpError.serviceUnavailable("Authentication unavailable");
 
-    const created = await createStaffAccount(auth, input);
+    const created = await createStaffAccount(auth, db, input);
 
     // autoSignIn is on (deliberately — see createStaffAccount), so sign-up also
     // wrote a session row for an account nobody has signed into. Its token was
@@ -330,7 +363,10 @@ export function createUsersRouter(
       updated = await db
         .update(user)
         .set({ name: input.name, email: input.email })
-        .where(eq(user.id, id.data))
+        // isNull matters as much as the id: a deleted row is invisible to GET,
+        // so letting PATCH still write it would make the list and the edit
+        // route disagree about which accounts exist.
+        .where(and(eq(user.id, id.data), isNull(user.deletedAt)))
         .returning({
           id: user.id,
           name: user.name,
@@ -340,10 +376,10 @@ export function createUsersRouter(
         });
     } catch (error) {
       if (!isDuplicateEmail(error)) throw error;
-      throw HttpError.conflict("A user with that email already exists.");
+      throw await emailConflict(db, input.email);
     }
 
-    // Zero rows updated means no such user, so the UPDATE doubles as the
+    // Zero rows updated means no such *live* user, so the UPDATE doubles as the
     // existence check and there is no SELECT-then-write race to lose.
     const row = updated[0];
     if (!row) throw HttpError.notFound("User not found");
@@ -369,6 +405,74 @@ export function createUsersRouter(
       // auth schema even though the column defaults to 'agent'.
       role: row.role ?? "agent",
       createdAt: row.createdAt.toISOString(),
+    };
+
+    res.json(body);
+  });
+
+  /**
+   * Soft-delete a staff account: stamp `deletedAt` and end its sessions.
+   *
+   * The row is kept rather than removed because `session` and `account` cascade
+   * from it, and because a ticket assigned to someone who has left still has to
+   * name them once Phase 7 lands. What "deleted" means is enforced in three
+   * places, and all three are needed: the reads in this file skip marked rows,
+   * `databaseHooks.session.create.before` in auth.ts refuses them a new session,
+   * and `requireAuth` refuses one that somehow still holds an old one.
+   */
+  router.delete("/users/:id", requireRole("admin"), async (req, res) => {
+    const id = userSchema.shape.id.safeParse(req.params.id);
+    if (!id.success) throw HttpError.badRequest("Malformed user id");
+
+    req.log.debug({ userId: id.data }, "deleting user");
+
+    if (!db) throw HttpError.serviceUnavailable("Database unavailable");
+
+    const [target] = await db
+      .select({ role: user.role, deletedAt: user.deletedAt })
+      .from(user)
+      .where(eq(user.id, id.data))
+      .limit(1);
+
+    // An already-deleted row is, to every other route here, not there — so this
+    // answers the same 404 they would, rather than reporting a second success
+    // for a deletion that happened at some other time.
+    if (!target || target.deletedAt) throw HttpError.notFound("User not found");
+
+    // The rule the UI also applies, but this is where it is enforced: hiding
+    // the button only hides the button. `role` is nullable in the generated
+    // schema, and the same `?? "agent"` default the reads use applies here.
+    if ((target.role ?? "agent") === "admin") {
+      throw HttpError.forbidden("Admin accounts cannot be deleted.");
+    }
+
+    // Both statements are Drizzle's, so unlike the password write in PATCH they
+    // *can* share a transaction — and they must. Marking the row without
+    // clearing its sessions would leave a deleted account signed in until its
+    // cookie expired; clearing sessions without marking the row would sign
+    // someone out of an account that still exists.
+    const [row] = await db.transaction(async (tx) => {
+      const marked = await tx
+        .update(user)
+        .set({ deletedAt: new Date() })
+        // isNull makes this idempotent under a concurrent second DELETE: the
+        // loser updates nothing and is answered 404 below rather than moving
+        // the timestamp a second time.
+        .where(and(eq(user.id, id.data), isNull(user.deletedAt)))
+        .returning({ id: user.id, deletedAt: user.deletedAt });
+
+      if (marked[0]) {
+        await tx.delete(session).where(eq(session.userId, id.data));
+      }
+
+      return marked;
+    });
+
+    if (!row?.deletedAt) throw HttpError.notFound("User not found");
+
+    const body: DeleteUserResponse = {
+      id: row.id,
+      deletedAt: row.deletedAt.toISOString(),
     };
 
     res.json(body);

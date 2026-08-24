@@ -39,6 +39,15 @@ export function requireAuth(auth: Auth | undefined): RequestHandler {
 
     if (!session) throw HttpError.unauthorized();
 
+    // A soft-deleted account must not be able to act, whatever it is holding.
+    // DELETE /api/users/:id clears the target's session rows in the same
+    // transaction that marks it, so reaching this ought to be impossible — but
+    // "ought to be" is doing a lot of work for a check that costs nothing, and
+    // it closes the window where a sign-in already in flight inserts its
+    // session just after the delete committed. `deletedAt` rides along on the
+    // session user because it is declared as an additional field in auth.ts.
+    if (session.user.deletedAt) throw HttpError.unauthorized();
+
     req.user = {
       id: session.user.id,
       email: session.user.email,

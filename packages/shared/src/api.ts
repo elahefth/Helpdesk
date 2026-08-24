@@ -212,3 +212,21 @@ export type UpdateUserFormValues = z.input<typeof updateUserBodySchema>;
 /** PATCH /api/users/:id answers 200 with the updated row, shaped like a list entry. */
 export const updateUserResponseSchema = userSummarySchema;
 export type UpdateUserResponse = z.infer<typeof updateUserResponseSchema>;
+
+/**
+ * DELETE /api/users/:id answers 200 with the row it marked, not 204.
+ *
+ * A body at all, because `request()` in the SPA parses every response with a
+ * schema and a 204 carries nothing to parse. `deletedAt` rather than a bare
+ * `{ ok: true }`, because the deletion is soft: the timestamp is the whole
+ * state change, and returning it means a caller never has to assume the
+ * server's clock agreed with its own.
+ *
+ * No `role` and no `email`: the row is gone from every list the moment this
+ * returns, and the SPA's only job with the response is to stop showing it.
+ */
+export const deleteUserResponseSchema = z.object({
+  id: z.string().uuid(),
+  deletedAt: z.string().datetime(),
+});
+export type DeleteUserResponse = z.infer<typeof deleteUserResponseSchema>;

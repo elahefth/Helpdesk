@@ -100,6 +100,13 @@ const patchAs = (
   body: unknown,
 ) => writeAs("PATCH", role, path, body);
 
+/** DELETE carries no body, so it does not go through `writeAs`. */
+const deleteAs = (role: keyof typeof STUB_USERS | "anon", path: string) =>
+  fetch(`${baseUrl}${path}`, {
+    method: "DELETE",
+    headers: role === "anon" ? {} : { cookie: `helpdesk.session=${role}` },
+  });
+
 const NEW_USER = {
   name: "Cass Agent",
   email: "cass@helpdesk.test",
@@ -402,6 +409,47 @@ describe("update user (admin only)", () => {
     const res = await patchAs("admin", TARGET, { ...EDIT, role: "admin" });
     expect(res.status).toBe(400);
     expect((await body(res)).error.code).toBe("validation_failed");
+  });
+});
+
+/**
+ * Deleting is soft, and admin accounts are exempt. Neither of those is visible
+ * without a database — the role of the *target* is a row, and this suite has
+ * none — so what is pinned here is the guard on the caller, the path param, and
+ * the fact that DELETE is routed at all. The exemption itself, the `deletedAt`
+ * write, and the session revocation are verified against real Postgres.
+ */
+describe("delete user (admin only)", () => {
+  it("rejects an unauthenticated request", async () => {
+    const res = await deleteAs("anon", TARGET);
+    expect(res.status).toBe(401);
+    expect((await body(res)).error.code).toBe("unauthorized");
+  });
+
+  it("forbids an agent deleting staff", async () => {
+    const res = await deleteAs("agent", TARGET);
+    expect(res.status).toBe(403);
+    expect((await body(res)).error.code).toBe("forbidden");
+  });
+
+  it("admits an admin as far as the database check", async () => {
+    const res = await deleteAs("admin", TARGET);
+    expect(res.status).toBe(503);
+    expect((await body(res)).error.code).toBe("service_unavailable");
+  });
+
+  it("rejects a malformed user id", async () => {
+    const res = await deleteAs("admin", "/api/users/not-a-uuid");
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("bad_request");
+  });
+
+  // Guards the ":id": a pathless DELETE must not reach something that would
+  // delete an unspecified user, or every user.
+  it("has no delete route without an id", async () => {
+    const res = await deleteAs("admin", "/api/users");
+    expect(res.status).toBe(404);
+    expect((await body(res)).error.code).toBe("not_found");
   });
 });
 
