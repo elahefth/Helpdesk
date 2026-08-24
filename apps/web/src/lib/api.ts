@@ -1,8 +1,11 @@
 import {
   apiErrorSchema,
+  createUserResponseSchema,
   listTicketsResponseSchema,
   listUsersResponseSchema,
   readinessSchema,
+  type CreateUserBody,
+  type CreateUserResponse,
   type ListTicketsQuery,
   type ListTicketsResponse,
   type ListUsersQuery,
@@ -87,4 +90,16 @@ export function listUsers(
   query: Partial<ListUsersQuery> = {},
 ): Promise<ListUsersResponse> {
   return request(`/api/users${toQueryString(query)}`, listUsersResponseSchema);
+}
+
+/**
+ * Admin-only, like listUsers. The new account is always an "agent": `role` is
+ * not part of the body because the API cannot accept one (see
+ * `createUserBodySchema`).
+ */
+export function createUser(body: CreateUserBody): Promise<CreateUserResponse> {
+  return request("/api/users", createUserResponseSchema, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }

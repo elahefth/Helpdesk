@@ -123,3 +123,36 @@ export const listUsersResponseSchema = z.object({
   nextCursor: z.string().nullable(),
 });
 export type ListUsersResponse = z.infer<typeof listUsersResponseSchema>;
+
+/**
+ * Body for POST /api/users. Admin-only. The server parses requests with it and
+ * the SPA's create-user form resolves against it, so "valid" has exactly one
+ * definition and the two sides cannot drift into disagreeing about it.
+ *
+ * `role` is absent deliberately rather than forgotten. `role` is `input: false`
+ * on the Better Auth user model (apps/api/src/auth.ts), so no payload can grant
+ * one — every account created here starts on the column default, "agent", and
+ * promoting someone stays a separate act.
+ *
+ * The trims run before the length checks, so "  Al  " fails the 3-character
+ * floor instead of being stored as a 2-character name. The password is not
+ * trimmed: leading and trailing spaces are legitimate characters in one, and
+ * silently removing them would lock the account out of its own password.
+ *
+ * Strict, unlike the read schemas: a plain `z.object` *strips* unknown keys, so
+ * a payload carrying `role: "admin"` would be accepted and quietly downgraded.
+ * On a write that mints credentials, an attempt to set a field this endpoint
+ * refuses to honour should be answered, not ignored.
+ */
+export const createUserBodySchema = z.strictObject({
+  name: z.string().trim().min(3, "Name must be at least 3 characters."),
+  email: z.string().trim().email("Enter a valid email address."),
+  // Better Auth enforces a floor of 8 itself; stating it here turns a rejected
+  // API call into a message under the field.
+  password: z.string().min(8, "Password must be at least 8 characters."),
+});
+export type CreateUserBody = z.infer<typeof createUserBodySchema>;
+
+/** POST /api/users answers 201 with the created row, shaped like a list entry. */
+export const createUserResponseSchema = userSummarySchema;
+export type CreateUserResponse = z.infer<typeof createUserResponseSchema>;

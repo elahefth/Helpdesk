@@ -192,6 +192,45 @@ describe("UsersPage", () => {
     expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
   });
 
+  /**
+   * The dialog's own behaviour is covered in CreateUserDialog.test.tsx. What is
+   * only observable from here is the seam between them: the invalidation has to
+   * name a key prefix that actually matches this page's ["users", { role }]
+   * entry, or the account is created and the table never shows it.
+   */
+  it("shows a newly created user without a manual reload", async () => {
+    responders.push(
+      jsonResponse(pageOf([userRow()])),
+      // POST /api/users
+      jsonResponse(
+        {
+          id: "33333333-3333-4333-8333-333333333333",
+          name: "Cass Agent",
+          email: "cass@helpdesk.test",
+          role: "agent",
+          createdAt: "2026-08-17T09:00:00.000Z",
+        },
+        201,
+      ),
+      // The refetch the invalidation triggers.
+      jsonResponse(pageOf([userRow(), BEN])),
+    );
+
+    const user = userEvent.setup();
+    renderWithQuery(<UsersPage />);
+    await screen.findByText("Ada Admin");
+
+    await user.click(screen.getByRole("button", { name: /New user/ }));
+    await user.type(screen.getByLabelText("Name"), "Cass Agent");
+    await user.type(screen.getByLabelText("Email"), "cass@helpdesk.test");
+    await user.type(screen.getByLabelText("Password"), "correct-horse");
+    await user.click(screen.getByRole("button", { name: "Create user" }));
+
+    expect(await screen.findByText("Ben Agent")).toBeDefined();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(requestedUrls).toEqual(["/api/users", "/api/users", "/api/users"]);
+  });
+
   it("refetches with role=agent when the filter changes", async () => {
     responders.push(
       jsonResponse(pageOf([userRow(), BEN])),

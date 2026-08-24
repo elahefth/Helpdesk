@@ -58,7 +58,12 @@ export function createApp(options: CreateAppOptions = {}): Express {
   // a request that fell through the first router would otherwise pay for a
   // second session lookup. Admin-only routes carry their own requireRole
   // internally, so the gate here stays "any signed-in staff".
-  app.use("/api", requireAuth(auth), ticketsRouter, createUsersRouter(db));
+  app.use(
+    "/api",
+    requireAuth(auth),
+    ticketsRouter,
+    createUsersRouter(db, auth),
+  );
 
   // Order matters: 404 catch-all, then the error handler, both last.
   app.use(notFoundHandler);

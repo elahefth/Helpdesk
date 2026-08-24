@@ -72,6 +72,27 @@ const getAuthedAs = (role: keyof typeof STUB_USERS, path: string) =>
     headers: { cookie: `helpdesk.session=${role}` },
   });
 
+/** As above but for the writes. `body` is sent raw so a malformed one is testable. */
+const postAs = (
+  role: keyof typeof STUB_USERS | "anon",
+  path: string,
+  body: unknown,
+) =>
+  fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(role === "anon" ? {} : { cookie: `helpdesk.session=${role}` }),
+    },
+    body: JSON.stringify(body),
+  });
+
+const NEW_USER = {
+  name: "Cass Agent",
+  email: "cass@helpdesk.test",
+  password: "correct-horse-battery",
+};
+
 /** `Response.json()` is `unknown`; tests assert on shape deliberately. */
 const body = (res: Response) => res.json() as Promise<any>;
 
@@ -175,6 +196,86 @@ describe("users (admin only)", () => {
     );
     expect(res.status).toBe(400);
     expect((await body(res)).error.code).toBe("bad_request");
+  });
+});
+
+/**
+ * POST is the only HTTP path that creates an account — sign-up is closed in
+ * auth.ts — so the guard on it is the whole access-control story for staff
+ * creation, and it is checked here rather than left to the E2E suite.
+ *
+ * This suite has no Postgres, so a well-formed request can only be followed as
+ * far as the database check. That is enough to pin the guard and the body
+ * validation, which are the parts that must not regress silently; the Better
+ * Auth hand-off itself needs a real database and belongs in e2e/.
+ */
+describe("create user (admin only)", () => {
+  it("rejects an unauthenticated request", async () => {
+    const res = await postAs("anon", "/api/users", NEW_USER);
+    expect(res.status).toBe(401);
+    expect((await body(res)).error.code).toBe("unauthorized");
+  });
+
+  it("forbids an agent creating staff", async () => {
+    const res = await postAs("agent", "/api/users", NEW_USER);
+    expect(res.status).toBe(403);
+    expect((await body(res)).error.code).toBe("forbidden");
+  });
+
+  it("admits an admin as far as the database check", async () => {
+    const res = await postAs("admin", "/api/users", NEW_USER);
+    expect(res.status).toBe(503);
+    expect((await body(res)).error.code).toBe("service_unavailable");
+  });
+
+  it("rejects a name shorter than three characters", async () => {
+    const res = await postAs("admin", "/api/users", {
+      ...NEW_USER,
+      name: "Al",
+    });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  // The trim runs before the length check, so whitespace cannot buy the third
+  // character — the counterpart of the same assertion in the SPA's form test.
+  it("rejects a name that only reaches three characters with padding", async () => {
+    const res = await postAs("admin", "/api/users", {
+      ...NEW_USER,
+      name: " Al ",
+    });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  it("rejects a password shorter than eight characters", async () => {
+    const res = await postAs("admin", "/api/users", {
+      ...NEW_USER,
+      password: "1234567",
+    });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  it("rejects a malformed email", async () => {
+    const res = await postAs("admin", "/api/users", {
+      ...NEW_USER,
+      email: "not-an-email",
+    });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  // `role` is input: false on the Better Auth user model and absent from
+  // createUserBodySchema, so a payload asking for admin is rejected outright
+  // rather than quietly having the field dropped.
+  it("rejects a payload that tries to hand out a role", async () => {
+    const res = await postAs("admin", "/api/users", {
+      ...NEW_USER,
+      role: "admin",
+    });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
   });
 });
 

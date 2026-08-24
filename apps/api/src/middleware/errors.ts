@@ -32,6 +32,15 @@ export class HttpError extends Error {
   }
 
   /**
+   * For a well-formed request that collides with existing state — a duplicate
+   * email on POST /api/users. Distinct from 400: nothing about the payload is
+   * malformed, so re-validating it would not help the caller.
+   */
+  static conflict(message: string) {
+    return new HttpError(409, "conflict", message);
+  }
+
+  /**
    * For a dependency the API is designed to boot without — a route that needs
    * Postgres when `getDb()` returned undefined. Distinct from 500: the request
    * was well-formed and may succeed on retry.

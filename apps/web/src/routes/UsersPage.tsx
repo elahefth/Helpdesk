@@ -2,6 +2,7 @@ import { useInfiniteQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { USER_ROLES, type UserRole } from "@helpdesk/shared";
 import { listUsers } from "../lib/api.ts";
+import { CreateUserDialog } from "./CreateUserDialog.tsx";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -59,7 +60,10 @@ export function UsersPage() {
 
   return (
     <section className="space-y-6">
-      <h2 className="text-2xl font-semibold tracking-tight">Users</h2>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-2xl font-semibold tracking-tight">Users</h2>
+        <CreateUserDialog />
+      </div>
 
       <div className="flex flex-wrap items-center gap-2">
         <Label htmlFor="role" className="text-muted-foreground">
@@ -99,7 +103,7 @@ export function UsersPage() {
           <CardContent className="py-10 text-center">
             <p className="font-medium">No users match that filter</p>
             <p className="mt-1 text-sm text-muted-foreground">
-              Staff accounts are created with the seed script; there is no
+              Staff accounts are created here or by the seed script; there is no
               sign-up.
             </p>
           </CardContent>

@@ -1,12 +1,17 @@
 import { Router } from "express";
 import { and, asc, eq, gt, isNull, or } from "drizzle-orm";
+import { APIError } from "better-auth/api";
 import {
+  createUserBodySchema,
   listUsersQuerySchema,
   userSchema,
+  type CreateUserBody,
+  type CreateUserResponse,
   type ListUsersResponse,
 } from "@helpdesk/shared";
+import type { Auth } from "../auth.ts";
 import type { Database } from "../db/client.ts";
-import { user } from "../db/schema.ts";
+import { session, user } from "../db/schema.ts";
 import { HttpError } from "../middleware/errors.ts";
 import { requireRole } from "../middleware/require-role.ts";
 
@@ -41,12 +46,64 @@ function decodeCursor(cursor: string): string {
 }
 
 /**
+ * Better Auth owns the credential half of a staff account: it hashes the password
+ * and writes it to `account`, and this repo has no second implementation of that.
+ * So creating a user goes through its API rather than a Drizzle insert.
+ *
+ * Two details here are load-bearing, and both look like omissions:
+ *
+ * 1. `signUpEmail` is called with a `body` and *nothing else* — no `headers`, no
+ *    `request`. `databaseHooks.user.create.before` in auth.ts throws whenever
+ *    `ctx.request` exists, which is what closes POST /api/auth/sign-up/email to
+ *    the internet. Forwarding this route's `req` would trip that same gate and
+ *    turn every create into "Sign up is disabled". The in-process call is the
+ *    documented seam, and seed.ts opens the first admin through it the same way.
+ *
+ * 2. `emailAndPassword.autoSignIn` is left at its default of true. Turning it off
+ *    switches Better Auth's duplicate-email response to a *synthetic* user
+ *    instead of an error — its account-enumeration defence, and exactly wrong for
+ *    an admin console, which would report success and create nothing.
+ */
+async function createStaffAccount(auth: Auth, body: CreateUserBody) {
+  try {
+    return await auth.api.signUpEmail({
+      body: { name: body.name, email: body.email, password: body.password },
+    });
+  } catch (error) {
+    // Better Auth signals expected failures with APIError. Re-shaping them keeps
+    // the reply in this API's error envelope, carrying this request's id, instead
+    // of surfacing as an unhandled 500.
+    if (!(error instanceof APIError)) throw error;
+
+    const code = typeof error.body?.code === "string" ? error.body.code : "";
+    // Both USER_ALREADY_EXISTS and USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL mean the
+    // same thing to an admin, and Better Auth has changed which one sign-up
+    // raises before. The prefix covers both without pinning the version.
+    if (code.startsWith("USER_ALREADY_EXISTS")) {
+      throw HttpError.conflict("A user with that email already exists.");
+    }
+
+    throw new HttpError(
+      error.statusCode,
+      "sign_up_failed",
+      error.body?.message ?? error.message,
+    );
+  }
+}
+
+/**
  * A factory taking the database handle, unlike its neighbour `ticketsRouter`,
  * which is a module-level const because it has no dependencies to inject. Per
  * CLAUDE.md, db-dependent modules take the handle — `getDb()` may return
  * undefined, and this route needs to answer for that rather than assume it.
+ *
+ * `auth` arrives the same way and for the same reason: it only exists when a
+ * database does, so POST has to answer for its absence rather than assume it.
  */
-export function createUsersRouter(db: Database | undefined): Router {
+export function createUsersRouter(
+  db: Database | undefined,
+  auth: Auth | undefined,
+): Router {
   const router = Router();
 
   router.get("/users", requireRole("admin"), async (req, res) => {
@@ -109,6 +166,50 @@ export function createUsersRouter(db: Database | undefined): Router {
     };
 
     res.json(body);
+  });
+
+  /**
+   * The only way to create a staff account over HTTP. Sign-up is closed (see
+   * auth.ts), so this route and `seed.ts` are the two doors, and this one is
+   * admin-gated.
+   */
+  router.post("/users", requireRole("admin"), async (req, res) => {
+    // Validation first, as in GET above: a malformed body should get a 400 that
+    // describes it rather than a 503 that blames the database. Throws ZodError,
+    // which Express 5 routes to the error handler as `validation_failed`.
+    const input = createUserBodySchema.parse(req.body);
+
+    // The email is the only field safe to log — the password must never reach a
+    // log line, and a request id already ties this to the rest of the request.
+    req.log.debug({ email: input.email }, "creating user");
+
+    if (!db) throw HttpError.serviceUnavailable("Database unavailable");
+    // Not reachable in practice: with no auth instance `requireAuth` answers 401
+    // to everything, so nothing gets this far. Narrowing the type honestly beats
+    // asserting past it, and the failure mode matches the missing database.
+    if (!auth) throw HttpError.serviceUnavailable("Authentication unavailable");
+
+    const created = await createStaffAccount(auth, input);
+
+    // autoSignIn is on (deliberately — see createStaffAccount), so sign-up also
+    // wrote a session row for an account nobody has signed into. Its token was
+    // never returned to anyone, which makes it an unusable credential with a
+    // multi-day lifetime; deleting it keeps "a session row means someone is
+    // signed in" true, which is the property the whole no-cookieCache design
+    // exists to preserve.
+    await db.delete(session).where(eq(session.userId, created.user.id));
+
+    const body: CreateUserResponse = {
+      id: created.user.id,
+      name: created.user.name,
+      email: created.user.email,
+      // Same guard as the projection in GET: `role` is nullable in the generated
+      // auth schema even though the column defaults to 'agent'.
+      role: created.user.role ?? "agent",
+      createdAt: created.user.createdAt.toISOString(),
+    };
+
+    res.status(201).json(body);
   });
 
   return router;
