@@ -30,10 +30,10 @@ const ROLE_ITEMS = [
  * Admin-only staff list. `RequireAdmin` keeps a non-admin from rendering this,
  * but the real boundary is GET /api/users, which answers 403 on its own.
  *
- * The table is hand-rolled rather than a `components/ui/table` primitive: four
- * columns of static markup do not need eight wrapper components. `TicketListPage`
- * is deliberately the same shape — when a screen finally needs sorting or column
- * control, that is the one that picks the table layer, and both move together.
+ * The table is hand-rolled rather than a table primitive: four columns of static
+ * markup, no sorting, no column control. `TicketListPage` is the same screen
+ * shape but is now on TanStack Table, because it needed sorting; port this one
+ * when it needs something too, not for symmetry.
  */
 export function UsersPage() {
   const [role, setRole] = useState<UserRole | "all">("all");

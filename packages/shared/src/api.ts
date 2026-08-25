@@ -90,11 +90,42 @@ export const ticketDetailSchema = ticketSummarySchema.extend({
 });
 export type TicketDetail = z.infer<typeof ticketDetailSchema>;
 
-/** Query params for GET /api/tickets. Parsed with this on the server. */
+/**
+ * The columns `GET /api/tickets` will sort by, and the ids the ticket table's
+ * columns carry so a header click maps to one of these without a lookup table
+ * in between.
+ *
+ * `sender` is one key rather than two because it is one column on screen: the
+ * cell renders the display name and falls back to the address, and the server
+ * orders by exactly that fallback. Sorting by the raw `student_name` would
+ * gather every nameless sender into one block that reads as unsorted.
+ *
+ * `updatedAt` has no column in the table and is here anyway — nothing else
+ * exposes "recently touched", and it costs a string.
+ */
+export const TICKET_SORT_KEYS = [
+  "subject",
+  "sender",
+  "status",
+  "category",
+  "createdAt",
+  "updatedAt",
+] as const;
+export const ticketSortKeySchema = z.enum(TICKET_SORT_KEYS);
+export type TicketSortKey = z.infer<typeof ticketSortKeySchema>;
+
+/**
+ * Query params for GET /api/tickets. Parsed with this on the server.
+ *
+ * Sorting is a server concern, not a table one: the SPA holds one page of a
+ * cursor-paginated list, so re-ordering the rows it happens to have would sort
+ * a sample and present it as the queue. The table sends `sort`/`order` and
+ * renders what comes back.
+ */
 export const listTicketsQuerySchema = z.object({
   status: ticketStatusSchema.optional(),
   category: ticketCategorySchema.optional(),
-  sort: z.enum(["createdAt", "updatedAt"]).default("createdAt"),
+  sort: ticketSortKeySchema.default("createdAt"),
   order: z.enum(["asc", "desc"]).default("desc"),
   limit: z.coerce.number().int().min(1).max(100).default(25),
   cursor: z.string().optional(),

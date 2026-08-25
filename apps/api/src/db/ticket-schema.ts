@@ -72,9 +72,12 @@ export const ticket = pgTable(
     /**
      * When the mail was received, per the source. Distinct from `createdAt`:
      * replaying an archive weeks later must not make every ticket look like it
-     * arrived today, and this is the column the queue is ordered by.
+     * arrived today.
      */
-    receivedAt: timestamp("received_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", {
+      withTimezone: true,
+      precision: 3,
+    }).notNull(),
 
     /**
      * `withTimezone`, unlike the generated auth tables. Those are
@@ -83,11 +86,22 @@ export const ticket = pgTable(
      * keyset cursor, where an hour of drift silently skips or repeats rows at
      * every page boundary. The ticket list pages on these columns, so they are
      * timestamptz and the comparison is unambiguous.
+     *
+     * **`precision: 3` is load-bearing for the same pagination**, and its
+     * absence fails in a way that looks nothing like a precision problem.
+     * Postgres defaults to microseconds; a JS `Date` holds milliseconds, so the
+     * driver truncates on the way out and a cursor built from a row is a hair
+     * *below* the row it names. Descending, that hair is harmless — the row is
+     * already past. Ascending, the row still satisfies "after the cursor", so
+     * it is returned again, and again: the list pages forever on one row. That
+     * is what `apps/api/src/routes/ticket-sort.test.ts` pins, and why the
+     * column stores only what a Date can represent rather than the query
+     * rounding at every comparison and giving up the index.
      */
-    createdAt: timestamp("created_at", { withTimezone: true })
+    createdAt: timestamp("created_at", { withTimezone: true, precision: 3 })
       .defaultNow()
       .notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true })
+    updatedAt: timestamp("updated_at", { withTimezone: true, precision: 3 })
       .defaultNow()
       .$onUpdate(() => new Date())
       .notNull(),
