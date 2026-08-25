@@ -160,6 +160,38 @@ describe("inboundEmailBodySchema", () => {
     expect(parsed.success).toBe(false);
   });
 
+  it.each([
+    ["omitted", undefined],
+    ["blank", ""],
+    ["whitespace only", "   "],
+  ])("treats a %s sender name as absent", (_label, fromName) => {
+    // A source that always sends the field, empty, must not store an empty
+    // string — the table would render a nameless gap instead of falling back
+    // to the address.
+    const parsed = inboundEmailBodySchema.parse(
+      fromName === undefined ? EMAIL : { ...EMAIL, fromName },
+    );
+    expect(parsed.fromName).toBeUndefined();
+  });
+
+  it("keeps a real sender name, trimmed", () => {
+    const parsed = inboundEmailBodySchema.parse({
+      ...EMAIL,
+      fromName: "  Ada Student  ",
+    });
+    expect(parsed.fromName).toBe("Ada Student");
+  });
+
+  // Unlike the address, the display name is not lowercased: it is a person's
+  // name, and "ada student" is not how anyone writes theirs.
+  it("preserves the case of the sender name", () => {
+    const parsed = inboundEmailBodySchema.parse({
+      ...EMAIL,
+      fromName: "Ada O'Brien-Smith",
+    });
+    expect(parsed.fromName).toBe("Ada O'Brien-Smith");
+  });
+
   it("leaves messageId, receivedAt and category optional", () => {
     const parsed = inboundEmailBodySchema.parse(EMAIL);
     expect(parsed.messageId).toBeUndefined();

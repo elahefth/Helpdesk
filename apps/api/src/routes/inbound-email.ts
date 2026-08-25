@@ -100,6 +100,7 @@ export function createInboundEmailRouter(db: Database | undefined): Router {
 
     const values = {
       subject: email.subject,
+      studentName: email.fromName ?? null,
       studentEmail: email.from,
       supportEmail: email.to,
       body: email.text,

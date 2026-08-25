@@ -16,6 +16,7 @@ export function toTicketSummary(row: TicketRow): TicketSummary {
   return {
     id: row.id,
     subject: row.subject,
+    studentName: row.studentName,
     studentEmail: row.studentEmail,
     status: row.status,
     category: row.category,

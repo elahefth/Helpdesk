@@ -63,6 +63,13 @@ export type UserSummary = z.infer<typeof userSummarySchema>;
 export const ticketSummarySchema = z.object({
   id: z.string().uuid(),
   subject: z.string(),
+  /**
+   * The display name off the From header, when the delivering source had one.
+   * Nullable because plenty of mail carries a bare address, and because every
+   * ticket ingested before this field existed has none — so a renderer must
+   * always be able to fall back to `studentEmail`.
+   */
+  studentName: z.string().nullable(),
   studentEmail: z.string().email(),
   status: ticketStatusSchema,
   category: ticketCategorySchema.nullable(),
@@ -253,6 +260,22 @@ export const inboundEmailBodySchema = z.strictObject({
    * this person is later grouped by, and "Ada@…" and "ada@…" are one student.
    */
   from: z.string().trim().toLowerCase().email("Enter a valid sender address."),
+  /**
+   * The display name half of `From: "Ada Student" <ada@example.com>`, already
+   * split off the address. Splitting it is the adapter's job, not this
+   * schema's: RFC 5322 allows quoted strings, escapes and RFC 2047 encoded
+   * words in there, and a regex over the raw header in a package the browser
+   * also imports would be the wrong place to get that wrong.
+   *
+   * Blank becomes undefined so a source that always sends the field, empty,
+   * does not store an empty string the UI would render as a nameless gap.
+   */
+  fromName: z
+    .string()
+    .trim()
+    .max(255)
+    .optional()
+    .transform((value) => value || undefined),
   /**
    * The support address it was delivered to. Required rather than assumed: the
    * route checks it against SUPPORT_EMAIL, which is what stops this endpoint

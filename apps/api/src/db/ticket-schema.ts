@@ -36,6 +36,14 @@ export const ticket = pgTable(
     studentEmail: text("student_email").notNull(),
 
     /**
+     * The display name off the From header. Nullable: plenty of mail carries a
+     * bare address, and it is not an identity — two people can send under the
+     * same name, and one person can change theirs between emails. The address
+     * is what `ticket_student_email_idx` groups by; this is only ever rendered.
+     */
+    studentName: text("student_name"),
+
+    /**
      * The support address it was delivered to. Stored rather than assumed from
      * config: SUPPORT_EMAIL can change, and a ticket should still say which
      * mailbox it actually arrived at.

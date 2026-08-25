@@ -8,7 +8,8 @@
  * would, to the same endpoint, so what it exercises is the real ingestion path
  * and not a test double.
  *
- *   bun run email:send -- --from=ada@example.com --subject="Refund please" \
+ *   bun run email:send -- --from=ada@example.com --from-name="Ada Student" \
+ *     --subject="Refund please" \
  *     --text="I dropped the course last week." --category=refund_request
  *
  * Every flag is optional; the defaults produce a plausible ticket. Reads
@@ -36,6 +37,7 @@ const supportEmail = process.env.SUPPORT_EMAIL ?? "support@helpdesk.test";
 // route parses with, which is the point of keeping it in packages/shared.
 const parsed = inboundEmailBodySchema.safeParse({
   from: flag("from") ?? "ada.student@example.com",
+  fromName: flag("from-name") ?? "Ada Student",
   to: flag("to") ?? supportEmail,
   subject: flag("subject") ?? "Cannot log in to the course portal",
   text:
@@ -85,4 +87,6 @@ console.log(
     : `Already delivered — existing ticket ${ticket.id}`,
 );
 console.log(`  ${ticket.subject}`);
-console.log(`  from ${ticket.studentEmail} · ${ticket.status}`);
+console.log(
+  `  from ${ticket.studentName ?? "(no name)"} <${ticket.studentEmail}> · ${ticket.status}`,
+);

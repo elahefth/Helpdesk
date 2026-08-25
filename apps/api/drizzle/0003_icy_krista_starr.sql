@@ -1,0 +1,1 @@
+ALTER TABLE "ticket" ADD COLUMN "student_name" text;

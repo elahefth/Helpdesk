@@ -1,11 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type {
-  ListTicketsResponse,
-  TicketDetail,
-  TicketSummary,
-} from "@helpdesk/shared";
+import type { ListTicketsResponse, TicketSummary } from "@helpdesk/shared";
 import { renderWithQuery } from "../test/render-with-query.tsx";
 import { TicketListPage } from "./TicketListPage.tsx";
 
@@ -30,6 +26,22 @@ function jsonResponse(body: unknown, status = 200): Responder {
     );
 }
 
+/** A response the test releases by hand, so the pending state can be asserted. */
+function gatedResponse(body: unknown) {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const responder: Responder = async () => {
+    await gate;
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  return { responder, release };
+}
+
 beforeEach(() => {
   requestedUrls.length = 0;
   responders = [];
@@ -52,6 +64,7 @@ function ticketRow(overrides: Partial<TicketSummary> = {}): TicketSummary {
   return {
     id: "33333333-3333-4333-8333-333333333333",
     subject: "Cannot log in to the course portal",
+    studentName: "Ada Student",
     studentEmail: "ada.student@example.com",
     status: "open",
     category: null,
@@ -65,14 +78,11 @@ function ticketRow(overrides: Partial<TicketSummary> = {}): TicketSummary {
 const REFUND = ticketRow({
   id: "44444444-4444-4444-8444-444444444444",
   subject: "Refund for the January cohort",
+  studentName: "Ben Student",
   studentEmail: "ben.student@example.com",
   status: "resolved",
   category: "refund_request",
 });
-
-function detailOf(row: TicketSummary, body: string): TicketDetail {
-  return { ...row, body, supportEmail: "support@helpdesk.test" };
-}
 
 function pageOf(
   data: TicketSummary[],
@@ -81,25 +91,72 @@ function pageOf(
   return { data, nextCursor };
 }
 
+const skeletons = () =>
+  document.querySelectorAll('[data-slot="skeleton"]').length;
+
 describe("TicketListPage", () => {
-  it("renders one row per ingested email and asks for no filters by default", async () => {
-    responders.push(jsonResponse(pageOf([ticketRow(), REFUND])));
+  it("shows skeleton rows under a real header while the first page loads", async () => {
+    const { responder, release } = gatedResponse(pageOf([ticketRow()]));
+    responders.push(responder);
 
     renderWithQuery(<TicketListPage />);
+
+    expect(skeletons()).toBeGreaterThan(0);
+    // The placeholder must not be silent for a screen reader.
+    expect(screen.getByText("Loading tickets…")).toBeDefined();
+    // The header renders during loading too — that is the point of shaping the
+    // placeholder like the table rather than swapping in a paragraph.
+    expect(screen.getByRole("columnheader", { name: "Subject" })).toBeDefined();
+
+    release();
 
     expect(
       await screen.findByText("Cannot log in to the course portal"),
     ).toBeDefined();
-    expect(screen.getByText("ada.student@example.com")).toBeDefined();
-    expect(screen.getByText("Refund for the January cohort")).toBeDefined();
+    expect(skeletons()).toBe(0);
+  });
+
+  it("renders the five columns asked for, in order", async () => {
+    responders.push(jsonResponse(pageOf([ticketRow()])));
+
+    renderWithQuery(<TicketListPage />);
+    await screen.findByText("Cannot log in to the course portal");
+
+    expect(
+      screen.getAllByRole("columnheader").map((th) => th.textContent),
+    ).toEqual(["Subject", "Sender", "Status", "Category", "Created"]);
+  });
+
+  it("renders a row per ticket and asks for no filters by default", async () => {
+    responders.push(jsonResponse(pageOf([ticketRow(), REFUND])));
+
+    renderWithQuery(<TicketListPage />);
+
+    const row = await screen.findByRole("row", { name: /Cannot log in/ });
+    expect(within(row).getByText("Ada Student")).toBeDefined();
+    expect(within(row).getByText("ada.student@example.com")).toBeDefined();
+    expect(within(row).getByText("open")).toBeDefined();
+    expect(
+      screen.getByRole("row", { name: /Refund for the January/ }),
+    ).toBeDefined();
 
     // No status or category param: the unfiltered list must not silently narrow.
     expect(requestedUrls[0]).toBe("/api/tickets");
   });
 
-  // The null is the feature — nothing classifies — so it has to render as a
-  // stated absence rather than as a blank space that reads like a layout bug.
-  it("labels an unclassified ticket rather than leaving a gap", async () => {
+  // Mail with a bare From header, and every ticket ingested before the column
+  // existed. The address is the fallback, so the cell is never empty.
+  it("falls back to the address when the email carried no display name", async () => {
+    responders.push(jsonResponse(pageOf([ticketRow({ studentName: null })])));
+
+    renderWithQuery(<TicketListPage />);
+
+    const row = await screen.findByRole("row", { name: /Cannot log in/ });
+    expect(within(row).getByText("ada.student@example.com")).toBeDefined();
+    expect(within(row).queryByText("Ada Student")).toBeNull();
+  });
+
+  it("labels an unclassified ticket rather than leaving the cell blank", async () => {
     responders.push(jsonResponse(pageOf([ticketRow()])));
 
     renderWithQuery(<TicketListPage />);
@@ -133,7 +190,7 @@ describe("TicketListPage", () => {
     });
   });
 
-  it("passes both filters at once", async () => {
+  it("passes the category filter too", async () => {
     responders.push(jsonResponse(pageOf([REFUND])));
     renderWithQuery(<TicketListPage />);
     await screen.findByText("Refund for the January cohort");
@@ -150,32 +207,37 @@ describe("TicketListPage", () => {
   });
 
   /**
-   * The body is a second request by design, and this is what pins it: the list
-   * response carries no `body` field at all, so if the row rendered the email
-   * without opening it, it could only be rendering something it invented.
+   * Pagination is keyset, so the second page is defined entirely by the cursor
+   * the first one returned. Asserting the cursor is in the URL — rather than
+   * just that more rows appeared — is what would catch it being dropped, which
+   * silently re-fetches page one forever.
    */
-  it("fetches the email body only when a row is opened", async () => {
-    const row = ticketRow();
-    responders.push(jsonResponse(pageOf([row])));
+  it("follows the cursor for the next page and appends to the table", async () => {
+    responders.push(jsonResponse(pageOf([ticketRow()], "cursor-page-2")));
 
     renderWithQuery(<TicketListPage />);
-    const trigger = await screen.findByRole("button", {
-      name: /Cannot log in/,
-    });
+    await screen.findByText("Cannot log in to the course portal");
 
-    expect(trigger.getAttribute("aria-expanded")).toBe("false");
-    expect(requestedUrls).toHaveLength(1);
-
-    responders.push(
-      jsonResponse(detailOf(row, "I have reset my password twice.")),
-    );
-    await userEvent.click(trigger);
+    responders.push(jsonResponse(pageOf([REFUND])));
+    await userEvent.click(screen.getByRole("button", { name: "Load more" }));
 
     expect(
-      await screen.findByText("I have reset my password twice."),
+      await screen.findByText("Refund for the January cohort"),
     ).toBeDefined();
-    expect(requestedUrls[1]).toBe(`/api/tickets/${row.id}`);
-    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    // The first page is still on screen: pages accumulate, they do not replace.
+    expect(
+      screen.getByText("Cannot log in to the course portal"),
+    ).toBeDefined();
+    expect(requestedUrls[1]).toBe("/api/tickets?cursor=cursor-page-2");
+  });
+
+  it("offers no Load more when the last page came back", async () => {
+    responders.push(jsonResponse(pageOf([ticketRow()], null)));
+
+    renderWithQuery(<TicketListPage />);
+    await screen.findByText("Cannot log in to the course portal");
+
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
   });
 
   it("surfaces a failed list rather than showing an empty queue", async () => {
@@ -196,9 +258,9 @@ describe("TicketListPage", () => {
     const alert = await screen.findByRole("alert");
     expect(within(alert).getByText("Could not load tickets")).toBeDefined();
     expect(within(alert).getByText("Database unavailable")).toBeDefined();
-    // "No tickets yet" here would tell an agent their queue is clear when the
-    // API never answered — the one wrong thing this screen could say.
-    expect(screen.queryByText("No tickets yet")).toBeNull();
+    // "No tickets" here would tell an agent their queue is clear when the API
+    // never answered — the one wrong thing this screen could say.
+    expect(screen.queryByText("No tickets match that filter")).toBeNull();
   });
 
   it("points at the ingestion path when the queue really is empty", async () => {
@@ -206,6 +268,8 @@ describe("TicketListPage", () => {
 
     renderWithQuery(<TicketListPage />);
 
-    expect(await screen.findByText("No tickets yet")).toBeDefined();
+    expect(
+      await screen.findByText("No tickets match that filter"),
+    ).toBeDefined();
   });
 });

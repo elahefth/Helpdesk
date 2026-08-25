@@ -31,8 +31,9 @@ const ROLE_ITEMS = [
  * but the real boundary is GET /api/users, which answers 403 on its own.
  *
  * The table is hand-rolled rather than a `components/ui/table` primitive: four
- * columns of static markup do not need eight wrapper components, and Phase 7's
- * ticket table is the screen that should decide which table layer the app adopts.
+ * columns of static markup do not need eight wrapper components. `TicketListPage`
+ * is deliberately the same shape — when a screen finally needs sorting or column
+ * control, that is the one that picks the table layer, and both move together.
  */
 export function UsersPage() {
   const [role, setRole] = useState<UserRole | "all">("all");
