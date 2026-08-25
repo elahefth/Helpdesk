@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import {
   createColumnHelper,
@@ -20,12 +20,13 @@ import {
   type TicketStatus,
   type TicketSummary,
 } from "@helpdesk/shared";
-import { ArrowDown, ArrowUp, ChevronsUpDown } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronsUpDown, Search, X } from "lucide-react";
 import { listTickets } from "../lib/api.ts";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -173,6 +174,33 @@ export function TicketListPage() {
   const [pageIndex, setPageIndex] = useState(0);
 
   /**
+   * Two pieces of state for one box: what has been typed, and what has been
+   * searched for.
+   *
+   * They are separate because the input has to stay responsive per keystroke
+   * while the query must not — one request per character would put eight
+   * in flight for "refund", each with its own cursor, and the last to arrive
+   * wins regardless of which was asked last. `search` is what reaches the
+   * query key, and it only moves when typing pauses.
+   */
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      // Trimmed here as well as in the shared schema: this value is a query key,
+      // and "refund" and "refund " would otherwise be two cache entries holding
+      // identical results.
+      setSearch(searchInput.trim());
+      // A search narrows the queue, so the page the reader was on is gone with
+      // the rows that were on it — same reason the two filters reset.
+      setPageIndex(0);
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
+  /**
    * Every control that changes the ordering or the set of rows also sends the
    * reader back to page 1, because the page they were on does not survive it:
    * page 3 of the open tickets is not page 3 of all of them, and a cursor from
@@ -207,11 +235,12 @@ export function TicketListPage() {
     fetchNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ["tickets", { status, category, sortKey, sortOrder }],
+    queryKey: ["tickets", { status, category, search, sortKey, sortOrder }],
     queryFn: ({ pageParam }) =>
       listTickets({
         ...(status === "all" ? {} : { status }),
         ...(category === "all" ? {} : { category }),
+        ...(search ? { q: search } : {}),
         // Omitted when they match the server's own defaults, so the common
         // request stays `/api/tickets` rather than carrying a redundant pair.
         ...(sortKey === "createdAt" && sortOrder === "desc"
@@ -300,7 +329,38 @@ export function TicketListPage() {
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        <Label htmlFor="status" className="text-muted-foreground">
+        <Label htmlFor="search" className="text-muted-foreground">
+          Search
+        </Label>
+        <div className="relative">
+          <Search
+            aria-hidden="true"
+            className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground"
+          />
+          <Input
+            id="search"
+            // `type="search"`, so a browser that offers a native clear control
+            // and Escape-to-clear does — the button below is the guarantee, not
+            // the only way.
+            type="search"
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+            placeholder="Subject, sender or message…"
+            className="w-64 pr-8 pl-8"
+          />
+          {searchInput && (
+            <button
+              type="button"
+              aria-label="Clear search"
+              onClick={() => setSearchInput("")}
+              className="absolute top-1/2 right-2 -translate-y-1/2 rounded-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+            >
+              <X aria-hidden="true" className="size-4" />
+            </button>
+          )}
+        </div>
+
+        <Label htmlFor="status" className="ml-4 text-muted-foreground">
           Status
         </Label>
         <Select
@@ -357,10 +417,25 @@ export function TicketListPage() {
       {data && tickets.length === 0 && (
         <Card className="border-dashed">
           <CardContent className="py-10 text-center">
-            <p className="font-medium">No tickets match that filter</p>
+            {/*
+              Naming the search rather than "that filter" when one is active:
+              the reader's next move is to edit or clear the term, and being
+              told a filter is at fault sends them to the wrong control.
+            */}
+            <p className="font-medium">
+              {search
+                ? `No tickets match “${search}”`
+                : "No tickets match that filter"}
+            </p>
             <p className="mt-1 text-sm text-muted-foreground">
-              Tickets appear here when email arrives at the support address.
-              Deliver one with <code>bun run email:send</code>.
+              {search ? (
+                "Searches cover the subject, the sender and the message body."
+              ) : (
+                <>
+                  Tickets appear here when email arrives at the support address.
+                  Deliver one with <code>bun run email:send</code>.
+                </>
+              )}
             </p>
           </CardContent>
         </Card>

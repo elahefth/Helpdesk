@@ -135,6 +135,24 @@ export type TicketSortKey = z.infer<typeof ticketSortKeySchema>;
 export const listTicketsQuerySchema = z.object({
   status: ticketStatusSchema.optional(),
   category: ticketCategorySchema.optional(),
+  /**
+   * Free-text search across the subject, the sender and the email body.
+   *
+   * Blank becomes `undefined` rather than an empty pattern, because the two are
+   * not the same question: `q=` would otherwise reach the server as a search
+   * for nothing, which matches everything by accident. Clearing the box has to
+   * mean "no search", and it is spelled once here rather than guarded at each
+   * of the two call sites.
+   *
+   * Capped at 200 characters. A search term longer than a subject line is a
+   * paste accident, and the pattern goes into a LIKE that scans every row.
+   */
+  q: z
+    .string()
+    .trim()
+    .max(200, "Search term is too long.")
+    .optional()
+    .transform((value) => value || undefined),
   sort: ticketSortKeySchema.default("createdAt"),
   order: z.enum(["asc", "desc"]).default("desc"),
   /**

@@ -563,3 +563,170 @@ describe("TicketListPage pagination", () => {
     expect(requestedUrls).toContain("/api/tickets?sort=subject&order=asc");
   });
 });
+
+/**
+ * The search box. Debounced, so the assertions have to advance fake timers
+ * rather than wait — and the debounce is the part worth covering: without it
+ * every keystroke is a request, and the last response to arrive wins rather
+ * than the last one asked for.
+ */
+describe("TicketListPage search", () => {
+  const typeSearch = async (text: string) => {
+    const box = screen.getByRole("searchbox", { name: /search/i });
+    await userEvent.type(box, text);
+    return box;
+  };
+
+  it("does not search until typing pauses", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      responders.push(jsonResponse(pageOf([ticketRow()], null, 1)));
+      renderWithQuery(<TicketListPage />);
+      await screen.findByText("Cannot log in to the course portal");
+
+      await typeSearch("refund");
+      // Six characters, and still only the initial request: a per-keystroke
+      // search would have fired six more, each with its own cursor.
+      expect(requestedUrls).toHaveLength(1);
+
+      responders.push(jsonResponse(pageOf([REFUND], null, 1)));
+      await vi.advanceTimersByTimeAsync(300);
+
+      await waitFor(() => {
+        expect(requestedUrls).toContain("/api/tickets?q=refund");
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends the term unencoded characters and all", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      responders.push(jsonResponse(pageOf([ticketRow()], null, 1)));
+      renderWithQuery(<TicketListPage />);
+      await screen.findByText("Cannot log in to the course portal");
+
+      responders.push(jsonResponse(pageOf([], null, 0)));
+      await typeSearch("50% off");
+      await vi.advanceTimersByTimeAsync(300);
+
+      // URLSearchParams encodes it; the server escapes the LIKE wildcard.
+      await waitFor(() => {
+        expect(requestedUrls).toContain("/api/tickets?q=50%25+off");
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops the parameter entirely when the box is cleared", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      responders.push(jsonResponse(pageOf([ticketRow()], null, 1)));
+      renderWithQuery(<TicketListPage />);
+      await screen.findByText("Cannot log in to the course portal");
+
+      responders.push(jsonResponse(pageOf([REFUND], null, 1)));
+      await typeSearch("refund");
+      await vi.advanceTimersByTimeAsync(300);
+      await waitFor(() => {
+        expect(requestedUrls).toContain("/api/tickets?q=refund");
+      });
+
+      responders.push(jsonResponse(pageOf([ticketRow()], null, 1)));
+      await userEvent.click(
+        screen.getByRole("button", { name: "Clear search" }),
+      );
+      await vi.advanceTimersByTimeAsync(300);
+
+      // `?q=` would reach the server as a search for nothing, which matches
+      // everything by accident — the parameter has to be absent, not empty.
+      await waitFor(() => {
+        expect(requestedUrls.at(-1)).toBe("/api/tickets");
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns to page 1 when a search begins", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const tenRows = Array.from({ length: 10 }, (_, i) =>
+        ticketRow({
+          id: `${i + 1}`.padStart(8, "0") + "-1111-4111-8111-111111111111",
+          subject: `Ticket number ${i + 1}`,
+        }),
+      );
+      responders.push(jsonResponse(pageOf(tenRows, "cursor-2", 100)));
+      renderWithQuery(<TicketListPage />);
+      await screen.findByText("Ticket number 1");
+
+      responders.push(jsonResponse(pageOf(tenRows, "cursor-3", 100)));
+      await userEvent.click(screen.getByRole("button", { name: /Next/ }));
+      await screen.findByText("Page 2 of 10");
+
+      responders.push(jsonResponse(pageOf([REFUND], null, 1)));
+      await typeSearch("refund");
+      await vi.advanceTimersByTimeAsync(300);
+
+      // Page 2 of a one-page result would render an empty table under a
+      // "Page 2 of 1" counter.
+      expect(await screen.findByText("Page 1 of 1")).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the filters while searching", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      responders.push(jsonResponse(pageOf([REFUND], null, 1)));
+      renderWithQuery(<TicketListPage />);
+      await screen.findByText("Refund for the January cohort");
+
+      responders.push(jsonResponse(pageOf([REFUND], null, 1)));
+      await userEvent.click(screen.getByRole("combobox", { name: /status/i }));
+      await userEvent.click(
+        await screen.findByRole("option", { name: "resolved" }),
+      );
+      await waitFor(() => {
+        expect(requestedUrls).toContain("/api/tickets?status=resolved");
+      });
+
+      responders.push(jsonResponse(pageOf([REFUND], null, 1)));
+      await typeSearch("cohort");
+      await vi.advanceTimersByTimeAsync(300);
+
+      await waitFor(() => {
+        expect(requestedUrls).toContain(
+          "/api/tickets?status=resolved&q=cohort",
+        );
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("names the search, not a filter, when nothing matches", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      responders.push(jsonResponse(pageOf([ticketRow()], null, 1)));
+      renderWithQuery(<TicketListPage />);
+      await screen.findByText("Cannot log in to the course portal");
+
+      responders.push(jsonResponse(pageOf([], null, 0)));
+      await typeSearch("nothing matches this");
+      await vi.advanceTimersByTimeAsync(300);
+
+      // The reader's next move is to edit or clear the term; blaming "that
+      // filter" sends them to the wrong control.
+      expect(
+        await screen.findByText(/No tickets match .nothing matches this./),
+      ).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

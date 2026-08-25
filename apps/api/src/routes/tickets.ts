@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, count, eq, type SQL } from "drizzle-orm";
+import { and, count, eq, ilike, or, type SQL } from "drizzle-orm";
 import {
   listTicketsQuerySchema,
   ticketSummarySchema,
@@ -15,6 +15,57 @@ import {
   ticketAfterCursor,
   ticketOrderBy,
 } from "./ticket-sort.ts";
+
+/**
+ * Turns a search term into a LIKE pattern, escaping the characters LIKE treats
+ * as wildcards.
+ *
+ * Without this, `%` typed into the search box matches every ticket and `_`
+ * matches any single character — so a student searching for "50%_refund" gets
+ * results that have nothing to do with what they typed, and a term of a single
+ * `%` silently returns the whole queue. The backslash is escaped first, or
+ * escaping the other two would then be undone by their own escape character.
+ *
+ * `ESCAPE '\'` is LIKE's default in Postgres, so the pattern needs no clause
+ * of its own — but it does mean the driver's parameter and the SQL's escape
+ * character have to agree, which is why the doubling happens here rather than
+ * being left to string interpolation somewhere else.
+ *
+ * Exported only so `tickets.test.ts` can pin it: no test with a stubbed
+ * database reaches the query, and the failure it guards against is silent —
+ * a wrong pattern returns results rather than an error.
+ */
+export function searchPattern(term: string): string {
+  const escaped = term
+    .replace(/\\/g, "\\\\")
+    .replace(/%/g, "\\%")
+    .replace(/_/g, "\\_");
+  return `%${escaped}%`;
+}
+
+/**
+ * Where a search term is allowed to match.
+ *
+ * The three visible columns plus the body. Including the body means a result
+ * can appear with nothing on the row explaining why — the honest cost of a
+ * helpdesk search that can actually find "the one about the double charge",
+ * where that phrase only ever appears in the email itself. Highlighting the
+ * match is what would resolve it, and that wants a ticket detail view first.
+ *
+ * `ilike` rather than `lower(col) like lower(?)`: same case-insensitivity, and
+ * it is the form a `pg_trgm` GIN index can serve when the queue outgrows a
+ * sequential scan. At this size it scans, deliberately — an index chosen before
+ * there is a query plan to justify it is a guess with a write cost.
+ */
+function matchesSearch(term: string): SQL | undefined {
+  const pattern = searchPattern(term);
+  return or(
+    ilike(ticket.subject, pattern),
+    ilike(ticket.studentName, pattern),
+    ilike(ticket.studentEmail, pattern),
+    ilike(ticket.body, pattern),
+  );
+}
 
 /**
  * A factory over the database handle, like `createUsersRouter`. It was a
@@ -42,6 +93,10 @@ export function createTicketsRouter(db: Database | undefined): Router {
     const filters: SQL | undefined = and(
       query.status ? eq(ticket.status, query.status) : undefined,
       query.category ? eq(ticket.category, query.category) : undefined,
+      // A search narrows the queue like any other filter, so it belongs here
+      // and not beside the cursor: the count has to see it, or the pager
+      // reports the size of a queue the reader is not looking at.
+      query.q ? matchesSearch(query.q) : undefined,
     );
 
     const rows = await db
