@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router";
 import type { ListTicketsResponse, TicketSummary } from "@helpdesk/shared";
 import { renderWithQuery } from "../test/render-with-query.tsx";
 import { TicketListPage } from "./TicketListPage.tsx";
@@ -97,6 +98,19 @@ function pageOf(
   return { data, nextCursor, total };
 }
 
+/**
+ * The subject cell is a `<Link>`, and `<Link>` throws outside a router — so
+ * every render here needs one. No routes are declared: nothing in this file
+ * navigates, and the destination is proven by asserting the href rather than
+ * by rendering the page it points at.
+ */
+const renderList = () =>
+  renderWithQuery(
+    <MemoryRouter>
+      <TicketListPage />
+    </MemoryRouter>,
+  );
+
 const skeletons = () =>
   document.querySelectorAll('[data-slot="skeleton"]').length;
 
@@ -105,7 +119,7 @@ describe("TicketListPage", () => {
     const { responder, release } = gatedResponse(pageOf([ticketRow()]));
     responders.push(responder);
 
-    renderWithQuery(<TicketListPage />);
+    renderList();
 
     expect(skeletons()).toBeGreaterThan(0);
     // The placeholder must not be silent for a screen reader.
@@ -128,7 +142,7 @@ describe("TicketListPage", () => {
   it("renders the five columns asked for, in order", async () => {
     responders.push(jsonResponse(pageOf([ticketRow()])));
 
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Cannot log in to the course portal");
 
     // Each header carries a visually hidden hint about what a click will do, so
@@ -140,10 +154,33 @@ describe("TicketListPage", () => {
     ).toEqual(["Subject", "Sender", "Status", "Category", "Created"]);
   });
 
+  it("links each subject to that ticket's own page", async () => {
+    responders.push(jsonResponse(pageOf([ticketRow(), REFUND])));
+
+    renderList();
+
+    // By role rather than by text: the assertion is that the subject *is* the
+    // link, not that a link happens to sit somewhere in the row. That is what
+    // keeps cmd-click and "copy link address" working — the two ways a ticket
+    // actually gets handed to another agent.
+    const link = await screen.findByRole("link", {
+      name: "Cannot log in to the course portal",
+    });
+    expect(link.getAttribute("href")).toBe(
+      "/tickets/33333333-3333-4333-8333-333333333333",
+    );
+
+    expect(
+      screen
+        .getByRole("link", { name: "Refund for the January cohort" })
+        .getAttribute("href"),
+    ).toBe("/tickets/44444444-4444-4444-8444-444444444444");
+  });
+
   it("renders a row per ticket and asks for no filters by default", async () => {
     responders.push(jsonResponse(pageOf([ticketRow(), REFUND])));
 
-    renderWithQuery(<TicketListPage />);
+    renderList();
 
     const row = await screen.findByRole("row", { name: /Cannot log in/ });
     expect(within(row).getByText("Ada Student")).toBeDefined();
@@ -162,7 +199,7 @@ describe("TicketListPage", () => {
   it("falls back to the address when the email carried no display name", async () => {
     responders.push(jsonResponse(pageOf([ticketRow({ studentName: null })])));
 
-    renderWithQuery(<TicketListPage />);
+    renderList();
 
     const row = await screen.findByRole("row", { name: /Cannot log in/ });
     expect(within(row).getByText("ada.student@example.com")).toBeDefined();
@@ -172,7 +209,7 @@ describe("TicketListPage", () => {
   it("labels an unclassified ticket rather than leaving the cell blank", async () => {
     responders.push(jsonResponse(pageOf([ticketRow()])));
 
-    renderWithQuery(<TicketListPage />);
+    renderList();
 
     expect(await screen.findByText("unclassified")).toBeDefined();
   });
@@ -180,7 +217,7 @@ describe("TicketListPage", () => {
   it("shows the human label for a category the sender stated", async () => {
     responders.push(jsonResponse(pageOf([REFUND])));
 
-    renderWithQuery(<TicketListPage />);
+    renderList();
 
     expect(await screen.findByText("Refund Request")).toBeDefined();
     // The wire value is an enum member; showing it raw would leak the schema.
@@ -189,7 +226,7 @@ describe("TicketListPage", () => {
 
   it("filters server-side, not over the page already fetched", async () => {
     responders.push(jsonResponse(pageOf([ticketRow(), REFUND])));
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Cannot log in to the course portal");
 
     responders.push(jsonResponse(pageOf([REFUND])));
@@ -205,7 +242,7 @@ describe("TicketListPage", () => {
 
   it("passes the category filter too", async () => {
     responders.push(jsonResponse(pageOf([REFUND])));
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Refund for the January cohort");
 
     responders.push(jsonResponse(pageOf([REFUND])));
@@ -232,7 +269,7 @@ describe("TicketListPage", () => {
       ),
     );
 
-    renderWithQuery(<TicketListPage />);
+    renderList();
 
     const alert = await screen.findByRole("alert");
     expect(within(alert).getByText("Could not load tickets")).toBeDefined();
@@ -245,7 +282,7 @@ describe("TicketListPage", () => {
   it("points at the ingestion path when the queue really is empty", async () => {
     responders.push(jsonResponse(pageOf([])));
 
-    renderWithQuery(<TicketListPage />);
+    renderList();
 
     expect(
       await screen.findByText("No tickets match that filter"),
@@ -270,7 +307,7 @@ describe("TicketListPage sorting", () => {
   it("starts newest-first without asking for it in the query string", async () => {
     responders.push(jsonResponse(pageOf([ticketRow()])));
 
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Cannot log in to the course portal");
 
     // createdAt desc is the server's own default, so sending it would be a
@@ -285,7 +322,7 @@ describe("TicketListPage sorting", () => {
 
   it("sends a clicked column as sort and order", async () => {
     responders.push(jsonResponse(pageOf([ticketRow(), REFUND])));
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Cannot log in to the course portal");
 
     responders.push(jsonResponse(pageOf([REFUND, ticketRow()])));
@@ -298,7 +335,7 @@ describe("TicketListPage sorting", () => {
 
   it("toggles direction on a second click of the same column", async () => {
     responders.push(jsonResponse(pageOf([ticketRow()])));
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Cannot log in to the course portal");
 
     responders.push(jsonResponse(pageOf([ticketRow()])));
@@ -319,7 +356,7 @@ describe("TicketListPage sorting", () => {
   // query key has to change with it so the list restarts.
   it("restarts pagination when the sort changes", async () => {
     responders.push(jsonResponse(pageOf([ticketRow()], "cursor-page-2")));
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Cannot log in to the course portal");
 
     responders.push(jsonResponse(pageOf([REFUND])));
@@ -334,7 +371,7 @@ describe("TicketListPage sorting", () => {
 
   it("keeps the filters while sorting", async () => {
     responders.push(jsonResponse(pageOf([REFUND])));
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Refund for the January cohort");
 
     responders.push(jsonResponse(pageOf([REFUND])));
@@ -365,7 +402,7 @@ describe("TicketListPage sorting", () => {
     // Deliberately not alphabetical: a client-side sort by subject would put
     // "Cannot log in" first, and the assertion below would catch it.
     responders.push(jsonResponse(pageOf([REFUND, ticketRow()])));
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Refund for the January cohort");
 
     responders.push(jsonResponse(pageOf([REFUND, ticketRow()])));
@@ -387,7 +424,7 @@ describe("TicketListPage sorting", () => {
 
   it("marks the sorted column for assistive tech, and only that one", async () => {
     responders.push(jsonResponse(pageOf([ticketRow()])));
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Cannot log in to the course portal");
 
     responders.push(jsonResponse(pageOf([ticketRow()])));
@@ -428,7 +465,7 @@ describe("TicketListPage pagination", () => {
   it("shows the range and the page count from the server's total", async () => {
     responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 100)));
 
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Ticket number 1");
 
     expect(screen.getByText("1–10 of 100")).toBeDefined();
@@ -437,7 +474,7 @@ describe("TicketListPage pagination", () => {
 
   it("shows one page at a time rather than accumulating", async () => {
     responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 100)));
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Ticket number 1");
 
     responders.push(jsonResponse(pageOf(tenRows(11), "cursor-3", 100)));
@@ -452,7 +489,7 @@ describe("TicketListPage pagination", () => {
 
   it("follows the cursor the previous page returned", async () => {
     responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 100)));
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Ticket number 1");
 
     responders.push(jsonResponse(pageOf(tenRows(11), "cursor-3", 100)));
@@ -466,7 +503,7 @@ describe("TicketListPage pagination", () => {
 
   it("goes back without hitting the network again", async () => {
     responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 100)));
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Ticket number 1");
 
     responders.push(jsonResponse(pageOf(tenRows(11), "cursor-3", 100)));
@@ -484,7 +521,7 @@ describe("TicketListPage pagination", () => {
 
   it("disables Prev on the first page and Next on the last", async () => {
     responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 20)));
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Ticket number 1");
 
     expect(
@@ -508,7 +545,7 @@ describe("TicketListPage pagination", () => {
     // 24 tickets over three pages, the last holding four. The range has to come
     // from the rows in hand, not from the page size, or it claims 21–30 of 24.
     responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 24)));
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Ticket number 1");
 
     responders.push(jsonResponse(pageOf(tenRows(11), "cursor-3", 24)));
@@ -525,7 +562,7 @@ describe("TicketListPage pagination", () => {
 
   it("returns to page 1 when a filter changes", async () => {
     responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 100)));
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Ticket number 1");
 
     responders.push(jsonResponse(pageOf(tenRows(11), "cursor-3", 100)));
@@ -548,7 +585,7 @@ describe("TicketListPage pagination", () => {
 
   it("returns to page 1 when the sort changes", async () => {
     responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 100)));
-    renderWithQuery(<TicketListPage />);
+    renderList();
     await screen.findByText("Ticket number 1");
 
     responders.push(jsonResponse(pageOf(tenRows(11), "cursor-3", 100)));
@@ -581,7 +618,7 @@ describe("TicketListPage search", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       responders.push(jsonResponse(pageOf([ticketRow()], null, 1)));
-      renderWithQuery(<TicketListPage />);
+      renderList();
       await screen.findByText("Cannot log in to the course portal");
 
       await typeSearch("refund");
@@ -604,7 +641,7 @@ describe("TicketListPage search", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       responders.push(jsonResponse(pageOf([ticketRow()], null, 1)));
-      renderWithQuery(<TicketListPage />);
+      renderList();
       await screen.findByText("Cannot log in to the course portal");
 
       responders.push(jsonResponse(pageOf([], null, 0)));
@@ -624,7 +661,7 @@ describe("TicketListPage search", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       responders.push(jsonResponse(pageOf([ticketRow()], null, 1)));
-      renderWithQuery(<TicketListPage />);
+      renderList();
       await screen.findByText("Cannot log in to the course portal");
 
       responders.push(jsonResponse(pageOf([REFUND], null, 1)));
@@ -660,7 +697,7 @@ describe("TicketListPage search", () => {
         }),
       );
       responders.push(jsonResponse(pageOf(tenRows, "cursor-2", 100)));
-      renderWithQuery(<TicketListPage />);
+      renderList();
       await screen.findByText("Ticket number 1");
 
       responders.push(jsonResponse(pageOf(tenRows, "cursor-3", 100)));
@@ -683,7 +720,7 @@ describe("TicketListPage search", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       responders.push(jsonResponse(pageOf([REFUND], null, 1)));
-      renderWithQuery(<TicketListPage />);
+      renderList();
       await screen.findByText("Refund for the January cohort");
 
       responders.push(jsonResponse(pageOf([REFUND], null, 1)));
@@ -713,7 +750,7 @@ describe("TicketListPage search", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       responders.push(jsonResponse(pageOf([ticketRow()], null, 1)));
-      renderWithQuery(<TicketListPage />);
+      renderList();
       await screen.findByText("Cannot log in to the course portal");
 
       responders.push(jsonResponse(pageOf([], null, 0)));

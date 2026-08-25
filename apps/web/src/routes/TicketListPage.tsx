@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import {
   createColumnHelper,
@@ -111,8 +112,18 @@ const columns: ColumnDef<typeof features, TicketSummary, unknown>[] = [
   columnHelper.accessor((row): unknown => row.subject, {
     id: "subject" satisfies TicketSortKey,
     header: "Subject",
+    // The subject is the row's handle: it is what a reader recognises the
+    // ticket by, so it is what opens it. A whole-row click would take the
+    // sender address and the status badge with it and leave no way to select
+    // text in the row; an anchor keeps middle-click, cmd-click and "copy link"
+    // working, which is how a ticket gets handed to someone else.
     cell: ({ row }) => (
-      <span className="font-medium">{row.original.subject}</span>
+      <Link
+        to={`/tickets/${row.original.id}`}
+        className="rounded-sm font-medium underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
+      >
+        {row.original.subject}
+      </Link>
     ),
   }),
   columnHelper.accessor((row): unknown => row.studentName ?? row.studentEmail, {

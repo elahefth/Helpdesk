@@ -5,6 +5,7 @@ import {
   listTicketsResponseSchema,
   listUsersResponseSchema,
   readinessSchema,
+  ticketDetailSchema,
   updateUserResponseSchema,
   type CreateUserBody,
   type CreateUserResponse,
@@ -14,6 +15,7 @@ import {
   type ListUsersQuery,
   type ListUsersResponse,
   type Readiness,
+  type TicketDetail,
   type UpdateUserBody,
   type UpdateUserResponse,
 } from "@helpdesk/shared";
@@ -88,6 +90,22 @@ export function listTickets(
     `/api/tickets${toQueryString(query)}`,
     listTicketsResponseSchema,
   );
+}
+
+/**
+ * One ticket, with the body the list deliberately omits.
+ *
+ * The id is encoded for the same reason `updateUser` encodes its own: it is a
+ * UUID this API issued today, and the cost of not assuming that forever is
+ * nothing.
+ *
+ * A 404 arrives here as an `ApiRequestError` with `status` 404, which is what
+ * lets the detail page tell "no such ticket" from "the request failed" — the
+ * first is a dead link and the reader's next move is the queue, the second is
+ * worth retrying.
+ */
+export function getTicket(id: string): Promise<TicketDetail> {
+  return request(`/api/tickets/${encodeURIComponent(id)}`, ticketDetailSchema);
 }
 
 /** Admin-only server-side; a non-admin session gets a 403 here, not a redirect. */

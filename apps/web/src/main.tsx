@@ -6,6 +6,7 @@ import { AppLayout } from "./AppLayout.tsx";
 import { LoginPage } from "./routes/LoginPage.tsx";
 import { RequireAdmin } from "./routes/RequireAdmin.tsx";
 import { RequireAuth } from "./routes/RequireAuth.tsx";
+import { TicketDetailPage } from "./routes/TicketDetailPage.tsx";
 import { TicketListPage } from "./routes/TicketListPage.tsx";
 import { UsersPage } from "./routes/UsersPage.tsx";
 import "./index.css";
@@ -32,6 +33,10 @@ const router = createBrowserRouter([
         element: <AppLayout />,
         children: [
           { index: true, element: <TicketListPage /> },
+          // The queue keeps its bare "/" — there is no /tickets list —
+          // but a single ticket needs an address of its own, because a
+          // ticket link is how work gets handed between agents.
+          { path: "tickets/:id", element: <TicketDetailPage /> },
           {
             element: <RequireAdmin />,
             children: [{ path: "users", element: <UsersPage /> }],
