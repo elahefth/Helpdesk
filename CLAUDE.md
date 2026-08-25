@@ -28,7 +28,9 @@ bun run db:migrate
 bun run db:studio
 bun run seed:admin     # -- --email=… --password=… --name=… --role=admin|agent
 bun run email:send     # deliver a fixture email to the running API -> one ticket
-                       # -- --from=… --subject=… --text=… --category=… --message-id=…
+                       # -- --from=… --from-name=… --subject=… --text=… --category=…
+bun run seed:tickets   # load the 100-ticket corpus (needs `bun run dev:api` up)
+                       # -- --reset   to clear the table first; idempotent otherwise
 
 bun run e2e:install    # one-time: download the Chromium build
 bun run db:up:test     # test Postgres on :5433 (see below)
@@ -147,6 +149,8 @@ Staff-only console: students never log in. Sessions live in the `session` table 
   - **`sender` sorts on `coalesce(student_name, student_email)`** — the same fallback the cell renders, so the column sorts the way it reads. Sorting the raw `student_name` would gather every nameless sender into one block.
   - **A nullable sort column (`category`, the only one) leads its ORDER BY with `IS NULL`**, so unclassified is the tail in *both* directions rather than flipping to the head on desc, and its keyset predicate carries an explicit `IS NULL` branch. The plain row-value tuple is wrong twice over there and both are silent: a NULL makes the comparison NULL rather than false, so the tail is unreachable and page two just ends early; and once the cursor is *inside* the tail there is no value left to compare.
   - **`ticket` timestamps are `precision: 3`.** Postgres defaults to microseconds and a JS `Date` holds milliseconds, so without it the driver truncates on read and a cursor lands a hair below the row it names — invisible descending, an infinite one-row loop ascending. `routes/ticket-sort.test.ts` pins both the column type and the round-trip.
+- **The seeded corpus is 100 committed fixtures, delivered over HTTP.** `dev/ticket-fixtures.ts` holds them and `dev/seed-tickets.ts` posts each one to `POST /api/inbound-email` with a deterministic Message-ID, so a rerun is idempotent by the same unique index a retrying provider hits. It then writes `created_at`, `updated_at` and `status` **directly**, which is the one place anything reaches around the API: ingestion stamps `created_at` with the row default and every ticket is born `open`, and there is no status-change endpoint yet — without the fix-up all hundred tickets would have been created this afternoon and none would ever have been resolved, which makes the date sort and the status filter impossible to check by eye. Move the status half into `PATCH /api/tickets/:id` when that lands.
+- **The corpus's spread is load-bearing, and `dev/ticket-fixtures.test.ts` pins it.** Subjects start across the whole alphabet, senders repeat and nine carry no display name, ~18% are unclassified, statuses skew with age, and `daysAgo` is irregular with a few same-day collisions. Each of those exists because a corpus that is uniform in one column makes that column's sort look broken rather than look sorted — the same-day rows, for instance, are the only thing that exercises the cursor's id tiebreaker from the UI.
 - **`apps/api/src/dev/send-inbound-email.ts` is the only source there is.** It posts the same normalised payload a real adapter would, to the same endpoint, so it exercises the real path rather than a test double — which is why there is no `EmailSource` interface yet: it would describe an integration nobody has written.
 
 ### Web
