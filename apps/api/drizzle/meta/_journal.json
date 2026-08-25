@@ -15,6 +15,13 @@
       "when": 1787588814529,
       "tag": "0001_wet_peter_quill",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787659461889,
+      "tag": "0002_wonderful_lester",
+      "breakpoints": true
     }
   ]
 }

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { createUserBodySchema, updateUserBodySchema } from "./api.ts";
+import {
+  createUserBodySchema,
+  inboundEmailBodySchema,
+  updateUserBodySchema,
+} from "./api.ts";
 
 /**
  * The email normalisation these cover is not cosmetic, and it is the reason
@@ -88,5 +92,88 @@ describe("updateUserBodySchema password", () => {
       password: "1234567",
     });
     expect(parsed.success).toBe(false);
+  });
+});
+
+/**
+ * The inbound-email contract. Ingestion is the one write nobody is signed in
+ * for, and the schema is where a malformed or lossy delivery is supposed to be
+ * caught — so the normalisations it performs are worth pinning.
+ */
+describe("inboundEmailBodySchema", () => {
+  const EMAIL = {
+    from: "ada.student@example.com",
+    to: "support@helpdesk.test",
+    subject: "Cannot log in",
+    text: "I have reset my password twice.",
+  };
+
+  it.each([
+    ["from", "Ada.Student@Example.COM"],
+    ["to", "Support@Helpdesk.TEST"],
+  ])("lowercases %s", (field, value) => {
+    const parsed = inboundEmailBodySchema.parse({ ...EMAIL, [field]: value });
+    expect(parsed[field as "from" | "to"]).toBe(value.toLowerCase());
+  });
+
+  // The route compares `to` against SUPPORT_EMAIL, which env.ts lowercases too.
+  // Without both sides normalised a provider that capitalises the address would
+  // have every one of its deliveries answered 422.
+  it("normalises the recipient the route matches on", () => {
+    const parsed = inboundEmailBodySchema.parse({
+      ...EMAIL,
+      to: "  Support@Helpdesk.test ",
+    });
+    expect(parsed.to).toBe("support@helpdesk.test");
+  });
+
+  it.each([
+    ["blank", ""],
+    ["whitespace only", "   "],
+  ])(
+    "gives a %s subject a placeholder rather than rejecting it",
+    (_l, subject) => {
+      // Real mail arrives with no subject often enough that a 400 here would lose
+      // tickets, and the column is NOT NULL.
+      const parsed = inboundEmailBodySchema.parse({ ...EMAIL, subject });
+      expect(parsed.subject).toBe("(no subject)");
+    },
+  );
+
+  it.each([
+    ["blank", ""],
+    ["whitespace only", "  \n  "],
+  ])("rejects a %s body", (_label, text) => {
+    // An email with nothing in it is not a ticket anyone can answer.
+    expect(inboundEmailBodySchema.safeParse({ ...EMAIL, text }).success).toBe(
+      false,
+    );
+  });
+
+  // Strict, and this is the case it exists for: a plain z.object would strip
+  // the unknown key, store an email whose body went missing, and answer 201.
+  it("rejects an unknown field instead of stripping it", () => {
+    const parsed = inboundEmailBodySchema.safeParse({
+      ...EMAIL,
+      bodyText: "the real message, under a name the schema does not know",
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("leaves messageId, receivedAt and category optional", () => {
+    const parsed = inboundEmailBodySchema.parse(EMAIL);
+    expect(parsed.messageId).toBeUndefined();
+    expect(parsed.receivedAt).toBeUndefined();
+    // Nothing classifies, so an email that did not state a category has none —
+    // rather than being guessed into one the UI could not tell from a decision.
+    expect(parsed.category).toBeUndefined();
+  });
+
+  it("keeps a category the source actually stated", () => {
+    const parsed = inboundEmailBodySchema.parse({
+      ...EMAIL,
+      category: "refund_request",
+    });
+    expect(parsed.category).toBe("refund_request");
   });
 });

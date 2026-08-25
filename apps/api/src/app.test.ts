@@ -142,17 +142,20 @@ describe("health", () => {
 });
 
 describe("tickets", () => {
-  it("returns an empty page", async () => {
+  // The list reads real rows now, so with no DATABASE_URL the furthest a valid
+  // request gets is the database check. That it gets that far is the assertion:
+  // the guard let it through and the query parsed.
+  it("admits a signed-in agent as far as the database check", async () => {
     const res = await getAuthed("/api/tickets");
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ data: [], nextCursor: null });
+    expect(res.status).toBe(503);
+    expect((await body(res)).error.code).toBe("service_unavailable");
   });
 
   it("accepts valid filters", async () => {
     const res = await getAuthed(
-      "/api/tickets?status=open&priority=urgent&limit=10",
+      "/api/tickets?status=open&category=refund_request&sort=updatedAt&limit=10",
     );
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(503);
   });
 
   it("rejects an invalid filter value", async () => {
@@ -160,6 +163,26 @@ describe("tickets", () => {
     expect(res.status).toBe(400);
     const payload = await body(res);
     expect(payload.error.code).toBe("validation_failed");
+  });
+
+  // Validation has to run before the database check, or a malformed request
+  // gets a 503 that blames Postgres for the caller's typo.
+  it("rejects a filter value the domain no longer has", async () => {
+    const res = await getAuthed("/api/tickets?status=pending");
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  it("rejects a malformed cursor before touching the database", async () => {
+    const res = await getAuthed("/api/tickets?cursor=not-a-cursor");
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("bad_request");
+  });
+
+  it("rejects a malformed ticket id", async () => {
+    const res = await getAuthed("/api/tickets/not-a-uuid");
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("bad_request");
   });
 
   it("attaches a request id to errors", async () => {
@@ -453,6 +476,82 @@ describe("delete user (admin only)", () => {
   });
 });
 
+/**
+ * The one unauthenticated write in the API. These pin the order its checks run
+ * in, which is the part that is easy to get wrong: a mail provider holds no
+ * session, so "no cookie" must not be an error here, while everything after
+ * that must still be refused.
+ *
+ * The suite runs with no DATABASE_URL, so a fully valid delivery gets as far as
+ * the database check and stops. That is deliberately the assertion — reaching
+ * 503 means the payload, the recipient check and the secret guard all passed.
+ */
+describe("inbound email", () => {
+  const EMAIL = {
+    from: "ada.student@example.com",
+    // env.ts defaults SUPPORT_EMAIL to this, and --env-file=/dev/null means the
+    // default is what the route is enforcing regardless of anyone's local .env.
+    to: "support@helpdesk.test",
+    subject: "Cannot log in",
+    text: "I have reset my password twice and still cannot sign in.",
+  };
+
+  it("accepts a delivery with no session at all", async () => {
+    const res = await postAs("anon", "/api/inbound-email", EMAIL);
+    expect(res.status).toBe(503);
+    expect((await body(res)).error.code).toBe("service_unavailable");
+  });
+
+  it("rejects a body missing the email itself", async () => {
+    const { text: _text, ...noBody } = EMAIL;
+    const res = await postAs("anon", "/api/inbound-email", noBody);
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  // The strictness is the point: a key this schema does not know means the
+  // adapter and the contract disagree, and the disagreement could be the email
+  // body itself under a different name.
+  it("rejects an unknown field rather than dropping it", async () => {
+    const res = await postAs("anon", "/api/inbound-email", {
+      ...EMAIL,
+      bodyText: "the actual email, under a name the schema does not know",
+    });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  it("refuses mail addressed somewhere other than the support address", async () => {
+    const res = await postAs("anon", "/api/inbound-email", {
+      ...EMAIL,
+      to: "someone.else@example.com",
+    });
+    expect(res.status).toBe(422);
+    expect((await body(res)).error.code).toBe("wrong_recipient");
+  });
+
+  it("rejects a category outside the domain vocabulary", async () => {
+    const res = await postAs("anon", "/api/inbound-email", {
+      ...EMAIL,
+      category: "career_services",
+    });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  // Guards the mount point: the router sits above requireAuth, and mounting it
+  // with a pathless use would swallow every unmatched /api path with it.
+  it("does not answer for any other unmatched /api path", async () => {
+    const res = await postAs("anon", "/api/inbound-emails", EMAIL);
+    expect(res.status).toBe(401);
+  });
+
+  it("has no GET route", async () => {
+    const res = await get("/api/inbound-email");
+    expect(res.status).toBe(401);
+  });
+});
+
 describe("auth guard", () => {
   it("rejects an unauthenticated ticket request", async () => {
     const res = await get("/api/tickets");
@@ -493,7 +592,13 @@ describe("ticket lifecycle", () => {
     expect(canTransition("closed", "open")).toBe(false);
   });
 
-  it("rejects skipping straight from new to resolved", () => {
-    expect(canTransition("new", "resolved")).toBe(false);
+  it("lets an agent resolve an open ticket", () => {
+    expect(canTransition("open", "resolved")).toBe(true);
+  });
+
+  // An ingested ticket is born open, so there is no state before it. Guarding
+  // the identity move keeps a no-op from counting as a legal transition.
+  it("rejects a move to the status a ticket already has", () => {
+    expect(canTransition("open", "open")).toBe(false);
   });
 });

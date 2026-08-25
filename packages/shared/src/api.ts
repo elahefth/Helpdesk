@@ -1,10 +1,7 @@
 import { z } from "zod";
 import {
-  messageDirectionSchema,
   ticketCategorySchema,
-  ticketPrioritySchema,
   ticketStatusSchema,
-  routingQueueSchema,
   userRoleSchema,
 } from "./domain.ts";
 
@@ -52,34 +49,37 @@ export const userSummarySchema = userSchema.extend({
 });
 export type UserSummary = z.infer<typeof userSummarySchema>;
 
-export const messageSchema = z.object({
-  id: z.string().uuid(),
-  direction: messageDirectionSchema,
-  fromAddress: z.string(),
-  body: z.string(),
-  createdAt: z.string().datetime(),
-});
-export type Message = z.infer<typeof messageSchema>;
-
+/**
+ * A ticket as the list view needs it. One row is one email that arrived at the
+ * support address; there is no thread yet, so there is no message count and no
+ * assignee — both would be columns nothing writes.
+ *
+ * `category` is nullable because nothing classifies. An email carries no
+ * category of its own, and with no AI in the pipeline the only way a ticket
+ * gets one is a human (or a sender that stated it — see `inboundEmailSchema`).
+ * A default of "general questions" would be a guess the UI could not tell from
+ * a decision, so unclassified is spelled null.
+ */
 export const ticketSummarySchema = z.object({
   id: z.string().uuid(),
   subject: z.string(),
   studentEmail: z.string().email(),
   status: ticketStatusSchema,
   category: ticketCategorySchema.nullable(),
-  priority: ticketPrioritySchema.nullable(),
-  routingQueue: routingQueueSchema.nullable(),
-  assigneeId: z.string().uuid().nullable(),
-  needsHuman: z.boolean(),
-  messageCount: z.number().int(),
+  receivedAt: z.string().datetime(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 });
 export type TicketSummary = z.infer<typeof ticketSummarySchema>;
 
+/**
+ * The list deliberately does not carry `body`: a page of 25 tickets would then
+ * ship 25 full emails to render 25 subject lines. Fetching one is what
+ * GET /api/tickets/:id is for.
+ */
 export const ticketDetailSchema = ticketSummarySchema.extend({
-  messages: z.array(messageSchema),
-  aiSummary: z.string().nullable(),
+  body: z.string(),
+  supportEmail: z.string().email(),
 });
 export type TicketDetail = z.infer<typeof ticketDetailSchema>;
 
@@ -87,9 +87,7 @@ export type TicketDetail = z.infer<typeof ticketDetailSchema>;
 export const listTicketsQuerySchema = z.object({
   status: ticketStatusSchema.optional(),
   category: ticketCategorySchema.optional(),
-  priority: ticketPrioritySchema.optional(),
-  assigneeId: z.string().uuid().optional(),
-  sort: z.enum(["createdAt", "updatedAt", "priority"]).default("updatedAt"),
+  sort: z.enum(["createdAt", "updatedAt"]).default("createdAt"),
   order: z.enum(["asc", "desc"]).default("desc"),
   limit: z.coerce.number().int().min(1).max(100).default(25),
   cursor: z.string().optional(),
@@ -230,3 +228,77 @@ export const deleteUserResponseSchema = z.object({
   deletedAt: z.string().datetime(),
 });
 export type DeleteUserResponse = z.infer<typeof deleteUserResponseSchema>;
+
+/**
+ * Body for POST /api/inbound-email — one email that arrived at the support
+ * address, already normalised.
+ *
+ * This is the seam a mail provider plugs into rather than the provider's own
+ * payload. There is no provider yet, so the shape is chosen to be the small
+ * intersection every one of them can produce: a Mailgun or SES adapter's whole
+ * job becomes mapping its webhook onto this and posting it. Nothing downstream
+ * ever sees a provider-shaped object, so adding a second provider later is a
+ * new adapter and no change here.
+ *
+ * `strictObject`, like the user writes and for a sharper version of the same
+ * reason: a plain `z.object` strips unknown keys, so an adapter that spelled a
+ * field `bodyText` instead of `text` would have the email's entire contents
+ * silently dropped and still be answered 201. On an endpoint whose only job is
+ * not to lose mail, a key this schema does not know is a bug worth reporting.
+ */
+export const inboundEmailBodySchema = z.strictObject({
+  /**
+   * The sender, which becomes the ticket's `studentEmail`. Lowercased for the
+   * same reason `createUserBodySchema.email` is: it is the key everything about
+   * this person is later grouped by, and "Ada@…" and "ada@…" are one student.
+   */
+  from: z.string().trim().toLowerCase().email("Enter a valid sender address."),
+  /**
+   * The support address it was delivered to. Required rather than assumed: the
+   * route checks it against SUPPORT_EMAIL, which is what stops this endpoint
+   * from being a general-purpose "create a ticket for any address" API.
+   */
+  to: z.string().trim().toLowerCase().email("Enter a valid support address."),
+  /**
+   * Real mail arrives with an empty subject often enough that rejecting it
+   * would lose tickets. Normalised here instead, so the column is NOT NULL and
+   * every renderer has something to print.
+   */
+  subject: z
+    .string()
+    .trim()
+    .max(998, "Subject exceeds the RFC 5322 line limit.")
+    .transform((value) => value || "(no subject)"),
+  /** The plain-text body. An email with nothing in it is not a ticket. */
+  text: z.string().trim().min(1, "The email body is empty."),
+  /**
+   * The provider's Message-ID. Optional because not every source has one, but
+   * supplying it is what makes delivery idempotent: the column is UNIQUE, so a
+   * provider that retries its webhook gets the ticket it already created rather
+   * than a duplicate. Without one, a retry is indistinguishable from a student
+   * sending the same thing twice, and both make a new ticket.
+   */
+  messageId: z.string().trim().min(1).max(998).optional(),
+  /**
+   * When the mail was received, per the provider. Optional and defaulted at the
+   * route rather than here, because "now" belongs to the server's clock and a
+   * schema shared with the browser must not read it.
+   */
+  receivedAt: z.string().datetime().optional(),
+  /**
+   * Only set by a source that genuinely knows — a category-specific alias, or a
+   * web form that asked. Nothing infers it: there is no classifier, and a guess
+   * would be indistinguishable from a fact to everyone downstream.
+   */
+  category: ticketCategorySchema.optional(),
+});
+export type InboundEmailBody = z.infer<typeof inboundEmailBodySchema>;
+
+/**
+ * POST /api/inbound-email answers with the ticket, 201 when it created one and
+ * 200 when `messageId` matched a delivery it had already handled. The body is
+ * the same either way — a retrying provider that reads the body gets the truth
+ * about where its email ended up, and the status code carries which case it was.
+ */
+export const inboundEmailResponseSchema = ticketDetailSchema;
+export type InboundEmailResponse = z.infer<typeof inboundEmailResponseSchema>;

@@ -43,13 +43,15 @@ Rules that are not negotiable, because the harness is built around them:
 
 ## Test only what exists
 
-The repo is early: `apps/api/src/db/schema.ts` re-exports only the auth tables, `GET /api/tickets` returns a hardcoded empty page, `UsersPage` is a bare heading, and there is no worker, AI, or email code. Comments referencing "Phase 5" and "Phase 7" mark deliberate placeholders.
+The repo is early: `UsersPage` is a full admin table, `GET /api/tickets` reads real rows, and tickets exist only because email arrives at `POST /api/inbound-email`. There is no worker, no AI, no email *provider*, no reply path, no assignment, and no status-change endpoint — `canTransition` is a shared function nothing calls yet. Comments referencing "Phase 6" and "Phase 7" mark deliberate placeholders.
 
 Before writing a single assertion, read the route component and the API handler you are covering. Then test the behavior that is actually implemented. A test asserting on ticket rows that no code path can produce is worse than no test — it will be deleted by whoever implements the feature, and until then it lies about coverage.
 
 If asked to cover something unimplemented, say what is missing and write the tests for the parts that do exist.
 
-What is worth covering today: sign-in and sign-out, the `RequireAuth` redirect and its return-to-deep-link behavior, `RequireAdmin` bouncing an agent off `/users`, admin-only nav visibility, the API's 401 on an unauthenticated request, `/api/tickets` filter validation returning 400 with `error.code === "validation_failed"`, the `x-request-id` header on errors, and the readiness badge.
+What is worth covering today: sign-in and sign-out, the `RequireAuth` redirect and its return-to-deep-link behavior, `RequireAdmin` bouncing an agent off `/users`, admin-only nav visibility, the API's 401 on an unauthenticated request, `/api/tickets` filter validation returning 400 with `error.code === "validation_failed"`, the `x-request-id` header on errors, the readiness badge, the admin user CRUD screens, and **ingestion end to end** — POST an email to `/api/inbound-email` and assert the ticket shows up in the SPA's queue for a signed-in agent.
+
+Ingestion is the one flow where a spec can create its own data over HTTP instead of inserting rows, which makes it the most honest coverage in the suite. Things about it that are worth a test and easy to get wrong: it takes **no session** (a mail source has none), it answers **422 `wrong_recipient`** for a `to` other than `SUPPORT_EMAIL` (set in `.env.test`), and posting the **same `messageId` twice** answers 200 with the first ticket rather than creating a second. `resetDomainData()` clears `ticket` already — the table list comes from the catalog.
 
 ## Locators
 

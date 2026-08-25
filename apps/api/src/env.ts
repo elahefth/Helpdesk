@@ -8,7 +8,8 @@ import { z } from "zod";
  * exists — /readyz reports the truth instead of the process crash-looping.
  * BETTER_AUTH_SECRET follows the same rule for the same reason: optional in
  * development (Better Auth falls back to a dev secret and warns), mandatory
- * in production, enforced by the refinement below.
+ * in production, enforced by the refinement below. INBOUND_EMAIL_SECRET is the
+ * third of the same shape.
  */
 const envSchema = z
   .object({
@@ -20,6 +21,28 @@ const envSchema = z
     DATABASE_URL: z.string().url().optional(),
     BETTER_AUTH_SECRET: z.string().min(32).optional(),
     BETTER_AUTH_URL: z.string().url().default("http://localhost:3000"),
+
+    /**
+     * The mailbox tickets are created from. POST /api/inbound-email refuses
+     * anything addressed elsewhere, which is what keeps it an ingestion
+     * endpoint rather than an open "create a ticket about anything" API.
+     */
+    SUPPORT_EMAIL: z
+      .string()
+      .trim()
+      .toLowerCase()
+      .email()
+      .default("support@helpdesk.test"),
+
+    /**
+     * Shared secret for the inbound-email webhook, compared against the
+     * `x-inbound-secret` header. Optional in development for the same reason
+     * BETTER_AUTH_SECRET is — a local `curl` should not need a ceremony — and
+     * mandatory in production, enforced below. The endpoint is necessarily
+     * unauthenticated (a mail provider holds no session), so this header is the
+     * only thing standing between it and anyone who can reach the host.
+     */
+    INBOUND_EMAIL_SECRET: z.string().min(16).optional(),
   })
   .superRefine((value, ctx) => {
     if (value.NODE_ENV === "production" && !value.BETTER_AUTH_SECRET) {
@@ -28,6 +51,15 @@ const envSchema = z
         path: ["BETTER_AUTH_SECRET"],
         message:
           "required in production — generate with: openssl rand -base64 32",
+      });
+    }
+
+    if (value.NODE_ENV === "production" && !value.INBOUND_EMAIL_SECRET) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["INBOUND_EMAIL_SECRET"],
+        message:
+          "required in production — the inbound-email webhook has no other guard",
       });
     }
   });

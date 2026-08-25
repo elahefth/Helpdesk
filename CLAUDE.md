@@ -27,6 +27,8 @@ bun run db:generate    # drizzle-kit generate after a schema change
 bun run db:migrate
 bun run db:studio
 bun run seed:admin     # -- --email=… --password=… --name=… --role=admin|agent
+bun run email:send     # deliver a fixture email to the running API -> one ticket
+                       # -- --from=… --subject=… --text=… --category=… --message-id=…
 
 bun run e2e:install    # one-time: download the Chromium build
 bun run db:up:test     # test Postgres on :5433 (see below)
@@ -82,7 +84,9 @@ preload that registers happy-dom *and* puts Bun's native `fetch` back, or the
 | shadcn/ui on Radix | shadcn/ui on **Base UI** (`@base-ui/react`) |
 | React Router 7 | React Router 8 |
 
-The implementation plan's phase numbering is still the shared vocabulary — code comments reference "Phase 5" and "Phase 7" to mark deliberate placeholders. Current state is roughly Phase 0 complete plus Phase 4 (auth) landed early: `apps/api/src/db/schema.ts` re-exports only the auth tables, `GET /api/tickets` returns a hardcoded empty page, and there is no worker, AI, or email code yet.
+The implementation plan's phase numbering is still the shared vocabulary — code comments reference "Phase 6" and "Phase 7" to mark deliberate placeholders. Current state is roughly Phase 0 complete, Phase 4 (auth) landed early, and the plain half of Phase 5 (email → ticket) landed after it: `db/schema.ts` re-exports the auth tables plus `ticket`, `GET /api/tickets` reads real rows, and there is no worker, no AI, and no email *provider*.
+
+The domain vocabulary was cut down when ingestion landed, and `packages/shared/src/domain.ts` no longer matches project-scope.md: statuses are `open | resolved | closed` (no `new`, no `pending`) and categories are `general_questions | technical | refund_request`. Nothing classifies, so a longer list would only be filters that always return nothing. `TICKET_PRIORITIES` and `ROUTING_QUEUES` are still there, consumed by nothing, as the shape a later phase grows into.
 
 ## Architecture
 
@@ -102,9 +106,11 @@ Consumed as **source**, not built — `main` points at `src/index.ts`. It holds 
 
 ### Middleware order in `app.ts` is load-bearing
 
-`helmet` → `cors` → `requestContext` → **Better Auth mount** → `express.json()` → health routes → `requireAuth` + app routes → 404 → error handler.
+`helmet` → `cors` → `requestContext` → **Better Auth mount** → `express.json()` → health routes → **inbound-email router** → `requireAuth` + app routes → 404 → error handler.
 
 Better Auth reads the raw request body itself, so its `app.all("/api/auth/*splat", …)` mount **must stay above `express.json()`** or auth requests hang. Express 5 rejects a bare `"*"` — hence the named splat. The 404 and error handlers must stay last, and `errorHandler` must keep all four parameters (Express identifies error middleware by arity).
+
+The inbound-email router is the one app router above `requireAuth`, because a mail source has no session — see Ingestion below. It is mounted at `"/api"` with a path (`/inbound-email`) inside it, not pathlessly, so every other `/api/*` request still falls through to the guarded routers and on to `notFoundHandler` — the same trap `requireRole` documents.
 
 Express 5 forwards rejected promises from async handlers to the error handler, so route handlers throw `HttpError.badRequest(…)` / let `ZodError` escape rather than wrapping themselves in try/catch. Every response carries an `x-request-id`, echoed into error bodies.
 
@@ -122,8 +128,21 @@ Staff-only console: students never log in. Sessions live in the `session` table 
 - **A deleted user keeps its email.** `user.email` is still UNIQUE, so the address stays reserved and re-creating that person fails — `emailConflict` in `routes/users.ts` answers "That email belongs to a deleted user" rather than the generic duplicate message, because otherwise an admin is told an address is taken by someone who appears in no list. There is no restore path; adding one is the natural way to make the address reachable again.
 - **Email is stored lowercased, and that is load-bearing.** Better Auth lowercases the address at sign-up and its `findUserByEmail` lowercases the address it is *given* before comparing it to the column, so a row whose email carries a capital is unreachable by every sign-in — and a password reset does not recover it, because the lookup fails before a password is checked. Creating a user goes through Better Auth and is normalised for free; `PATCH /api/users/:id` writes the column directly and is not, so the `.toLowerCase()` lives on the shared `email` field in `packages/shared/src/api.ts`, where both routes and both forms pick it up. `packages/shared/src/api.test.ts` pins it. Anything else that writes `user.email` directly must normalise too.
 - **A unique-violation from Drizzle is not the driver's error.** Drizzle wraps it in a `DrizzleQueryError` and keeps the original on `cause`, so `isDuplicateEmail` in `routes/users.ts` walks the cause chain to find Bun's `errno` (the SQLSTATE — `code` is Bun's own constant and the same for every failure) and the constraint name. Reading those off the thrown object alone passes a driver-level probe and turns every duplicate email into a 500; `routes/users.test.ts` pins it, since no test with a stubbed database can.
-- `apps/api/src/db/auth-schema.ts` is generated by `@better-auth/cli generate` through `auth.cli.ts` — never hand-edit it. `db/schema.ts` re-exports it so `drizzle.config.ts` and `drizzle({ schema })` see one file.
+- `apps/api/src/db/auth-schema.ts` is generated by `@better-auth/cli generate` through `auth.cli.ts` — never hand-edit it. Hand-written domain tables live beside it in `ticket-schema.ts`; `db/schema.ts` re-exports both so `drizzle.config.ts` and `drizzle({ schema })` see one file.
 - A `better-auth-best-practices` skill is available in `.claude/skills/` (symlinked from `.agents/skills/`).
+
+### Ingestion — email becomes a ticket
+
+`POST /api/inbound-email` is the whole of it. One delivered email becomes one `ticket` row; there is no worker, no queue, no message table, and no classifier.
+
+- **It is the API's only unauthenticated write, and necessarily so.** Whatever delivers the mail — a provider webhook, a forwarding script, `bun run email:send` — holds no session and never will. It is mounted at `/api` *above* `requireAuth` in `app.ts` for that reason, and `INBOUND_EMAIL_SECRET` presented as `x-inbound-secret` stands in for the session. That secret is optional in development (a local `curl` should not need a ceremony) and `env.ts` refuses to boot in production without one, exactly like `BETTER_AUTH_SECRET`. The comparison lives in the exported pure function `isAuthorizedSource` because `env` is parsed once at import — a test cannot configure a secret and then make a request against it, so the guard has to be reachable some other way, and an untested guard on the one open write is not worth having.
+- **`inboundEmailBodySchema` is the provider seam, not a provider payload.** It is the small intersection every provider can produce; a Mailgun or SES adapter's entire job becomes mapping its webhook onto this shape and posting it, so nothing downstream ever sees a provider-shaped object. It is `strictObject` for a sharper reason than the user writes: a plain `z.object` strips unknown keys, so an adapter that spelled the body `bodyText` would have the email's contents silently dropped and still be answered 201.
+- **`SUPPORT_EMAIL` is enforced, not decorative.** The route answers 422 `wrong_recipient` for mail addressed elsewhere, which is what keeps this from being an open "create a ticket about anything" endpoint. Both sides are lowercased — the schema's `to` field and `env.ts`'s value — or a provider that capitalises the address would have every delivery refused.
+- **`source_message_id` is UNIQUE, and that is the idempotency.** Insert is `onConflictDoNothing` on that column, in one statement: a provider retrying a slow webhook is the normal case, and SELECT-then-INSERT would lose that race. A conflicting delivery is answered **200 with the existing ticket** rather than 409 — the mail *was* accepted, the first time. `messageId` is optional because not every source has one, and Postgres treats NULLs as distinct under a unique index, so unidentified mail is simply never deduplicated rather than colliding with the last such row.
+- **`category` is nullable and nothing infers it.** Only a source that genuinely knows (a category-specific alias, a web form) may state one. A default would be a guess indistinguishable from a decision to everyone downstream; the SPA renders the null as "unclassified".
+- **`ticket` timestamps are `timestamptz`**, unlike the generated auth tables, which are not. The list pages on `created_at`/`updated_at` with a keyset cursor, and the driver round-tripping a naive timestamp through the host's local offset would silently skip or repeat rows at every page boundary. `received_at` is separate from `created_at` on purpose: replaying an archive must not make every ticket look like it arrived today.
+- **The ticket list cursor is a `(timestamp, id)` tuple**, unlike the user list's single email — neither half is a total order alone. The predicate is a row-value comparison (`(sort, id) < (v, id)`), which Postgres can drive straight from the composite index; the `OR`-expanded form usually degrades to a scan on page two. The `ORDER BY` must keep matching the tuple exactly or rows go missing between pages.
+- **`apps/api/src/dev/send-inbound-email.ts` is the only source there is.** It posts the same normalised payload a real adapter would, to the same endpoint, so it exercises the real path rather than a test double — which is why there is no `EmailSource` interface yet: it would describe an integration nobody has written.
 
 ### Web
 

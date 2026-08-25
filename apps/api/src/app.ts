@@ -9,7 +9,8 @@ import { requestContext } from "./middleware/request-context.ts";
 import { requireAuth } from "./middleware/require-auth.ts";
 import { errorHandler, notFoundHandler } from "./middleware/errors.ts";
 import { healthRouter } from "./routes/health.ts";
-import { ticketsRouter } from "./routes/tickets.ts";
+import { createInboundEmailRouter } from "./routes/inbound-email.ts";
+import { createTicketsRouter } from "./routes/tickets.ts";
 import { createUsersRouter } from "./routes/users.ts";
 
 export interface CreateAppOptions {
@@ -51,6 +52,14 @@ export function createApp(options: CreateAppOptions = {}): Express {
   // its login screen, before anyone has a session.
   app.use(healthRouter);
 
+  // Also public, and necessarily so: whatever delivers mail here — a provider
+  // webhook, a forwarding script, the fixture sender — has no session and never
+  // will. It sits above requireAuth for that reason, and carries its own guard
+  // (the x-inbound-secret header) in place of one. Mounted at "/api" like the
+  // routers below, so an unmatched /api path still falls through to them and on
+  // to notFoundHandler.
+  app.use("/api", createInboundEmailRouter(db));
+
   // Everything else under /api is staff-only. The auth routes above already
   // terminated their own responses, so they never reach this guard.
   //
@@ -61,7 +70,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
   app.use(
     "/api",
     requireAuth(auth),
-    ticketsRouter,
+    createTicketsRouter(db),
     createUsersRouter(db, auth),
   );
 

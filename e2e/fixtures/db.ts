@@ -34,8 +34,9 @@ function client(): postgres.Sql {
  * Empties every table in the public schema except `exclude` (and Drizzle's
  * migration ledger).
  *
- * The table list is read from the catalog rather than hardcoded, so the Phase 5
- * ticket tables are covered the day they are created without an edit here.
+ * The table list is read from the catalog rather than hardcoded, so a table
+ * added by a later migration is covered the day it is created, without an edit
+ * here — `ticket` arrived that way.
  */
 export async function truncateAll(exclude: string[] = []): Promise<string[]> {
   const db = client();
@@ -59,8 +60,9 @@ export async function truncateAll(exclude: string[] = []): Promise<string[]> {
  * The one a test's `beforeEach` wants: clears application data but leaves the
  * seeded staff accounts and their sessions intact, so storageState keeps working.
  *
- * A no-op until the ticket tables land — schema.ts currently re-exports only the
- * auth tables. That is expected, not a bug.
+ * `ticket` is covered without an edit here, because the table list comes from
+ * the catalog rather than a constant — which is what the comment on
+ * `truncateAll` promised, and the reason it is written that way.
  */
 export function resetDomainData(): Promise<string[]> {
   return truncateAll(AUTH_TABLES);

@@ -4,6 +4,7 @@ import {
   deleteUserResponseSchema,
   listTicketsResponseSchema,
   listUsersResponseSchema,
+  ticketDetailSchema,
   readinessSchema,
   updateUserResponseSchema,
   type CreateUserBody,
@@ -14,6 +15,7 @@ import {
   type ListUsersQuery,
   type ListUsersResponse,
   type Readiness,
+  type TicketDetail,
   type UpdateUserBody,
   type UpdateUserResponse,
 } from "@helpdesk/shared";
@@ -88,6 +90,15 @@ export function listTickets(
     `/api/tickets${toQueryString(query)}`,
     listTicketsResponseSchema,
   );
+}
+
+/**
+ * One ticket, including the email body the list omits. Separate from
+ * `listTickets` rather than folded into it: a page of 25 subject lines should
+ * not carry 25 full emails.
+ */
+export function getTicket(id: string): Promise<TicketDetail> {
+  return request(`/api/tickets/${encodeURIComponent(id)}`, ticketDetailSchema);
 }
 
 /** Admin-only server-side; a non-admin session gets a 403 here, not a redirect. */
