@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, eq } from "drizzle-orm";
+import { and, count, eq, type SQL } from "drizzle-orm";
 import {
   listTicketsQuerySchema,
   ticketSummarySchema,
@@ -35,13 +35,21 @@ export function createTicketsRouter(db: Database | undefined): Router {
 
     if (!db) throw HttpError.serviceUnavailable("Database unavailable");
 
+    // Built once and used twice, deliberately: the count must see the same
+    // filters as the page or "Page 3 of 10" is a count of a different queue.
+    // The cursor is the one predicate it must *not* see — it narrows to what
+    // follows a position, and the total is of everything that matches.
+    const filters: SQL | undefined = and(
+      query.status ? eq(ticket.status, query.status) : undefined,
+      query.category ? eq(ticket.category, query.category) : undefined,
+    );
+
     const rows = await db
       .select()
       .from(ticket)
       .where(
         and(
-          query.status ? eq(ticket.status, query.status) : undefined,
-          query.category ? eq(ticket.category, query.category) : undefined,
+          filters,
           cursor
             ? ticketAfterCursor(query.sort, query.order, cursor)
             : undefined,
@@ -59,9 +67,21 @@ export function createTicketsRouter(db: Database | undefined): Router {
     const page = hasMore ? rows.slice(0, query.limit) : rows;
     const last = page.at(-1);
 
+    // A second round trip, which is the price of a page counter — a cursor can
+    // say whether a next page exists but never how many follow. Issued after
+    // the page rather than in parallel so a request that is going to fail on
+    // the page query does not pay for a count nobody will read.
+    const [counted] = await db
+      .select({ total: count() })
+      .from(ticket)
+      .where(filters);
+
     const body: ListTicketsResponse = {
       data: page.map(toTicketSummary),
       nextCursor: hasMore && last ? encodeTicketCursor(last, query.sort) : null,
+      // `count()` over an empty match returns a row holding 0, so the fallback
+      // is for a shape that cannot occur rather than for an empty queue.
+      total: counted?.total ?? 0,
     };
 
     res.json(body);

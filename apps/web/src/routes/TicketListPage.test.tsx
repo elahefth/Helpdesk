@@ -84,11 +84,17 @@ const REFUND = ticketRow({
   category: "refund_request",
 });
 
+/**
+ * `total` defaults to the page's own length, which is the single-page case.
+ * Pass it explicitly to describe a queue longer than the rows in hand — that is
+ * what the pager divides to get "Page 1 of 10".
+ */
 function pageOf(
   data: TicketSummary[],
   nextCursor: string | null = null,
+  total = data.length,
 ): ListTicketsResponse {
-  return { data, nextCursor };
+  return { data, nextCursor, total };
 }
 
 const skeletons = () =>
@@ -211,40 +217,6 @@ describe("TicketListPage", () => {
     await waitFor(() => {
       expect(requestedUrls).toContain("/api/tickets?category=refund_request");
     });
-  });
-
-  /**
-   * Pagination is keyset, so the second page is defined entirely by the cursor
-   * the first one returned. Asserting the cursor is in the URL — rather than
-   * just that more rows appeared — is what would catch it being dropped, which
-   * silently re-fetches page one forever.
-   */
-  it("follows the cursor for the next page and appends to the table", async () => {
-    responders.push(jsonResponse(pageOf([ticketRow()], "cursor-page-2")));
-
-    renderWithQuery(<TicketListPage />);
-    await screen.findByText("Cannot log in to the course portal");
-
-    responders.push(jsonResponse(pageOf([REFUND])));
-    await userEvent.click(screen.getByRole("button", { name: "Load more" }));
-
-    expect(
-      await screen.findByText("Refund for the January cohort"),
-    ).toBeDefined();
-    // The first page is still on screen: pages accumulate, they do not replace.
-    expect(
-      screen.getByText("Cannot log in to the course portal"),
-    ).toBeDefined();
-    expect(requestedUrls[1]).toBe("/api/tickets?cursor=cursor-page-2");
-  });
-
-  it("offers no Load more when the last page came back", async () => {
-    responders.push(jsonResponse(pageOf([ticketRow()], null)));
-
-    renderWithQuery(<TicketListPage />);
-    await screen.findByText("Cannot log in to the course portal");
-
-    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
   });
 
   it("surfaces a failed list rather than showing an empty queue", async () => {
@@ -435,5 +407,159 @@ describe("TicketListPage sorting", () => {
         .getAllByRole("columnheader")
         .filter((th) => th.getAttribute("aria-sort") !== "none"),
     ).toHaveLength(1);
+  });
+});
+
+/**
+ * The pager. Keyset pagination underneath, one page on screen at a time, and a
+ * counter that has to come from the server's `total` because a cursor knows
+ * only whether a next page exists — never how many follow.
+ */
+describe("TicketListPage pagination", () => {
+  /** Ten rows, as the real page size delivers. */
+  const tenRows = (offset: number) =>
+    Array.from({ length: 10 }, (_, i) =>
+      ticketRow({
+        id: `${offset + i}`.padStart(8, "0") + "-1111-4111-8111-111111111111",
+        subject: `Ticket number ${offset + i}`,
+      }),
+    );
+
+  it("shows the range and the page count from the server's total", async () => {
+    responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 100)));
+
+    renderWithQuery(<TicketListPage />);
+    await screen.findByText("Ticket number 1");
+
+    expect(screen.getByText("1–10 of 100")).toBeDefined();
+    expect(screen.getByText("Page 1 of 10")).toBeDefined();
+  });
+
+  it("shows one page at a time rather than accumulating", async () => {
+    responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 100)));
+    renderWithQuery(<TicketListPage />);
+    await screen.findByText("Ticket number 1");
+
+    responders.push(jsonResponse(pageOf(tenRows(11), "cursor-3", 100)));
+    await userEvent.click(screen.getByRole("button", { name: /Next/ }));
+
+    expect(await screen.findByText("Ticket number 11")).toBeDefined();
+    // The whole point of the change: page 1's rows are gone, not appended to.
+    expect(screen.queryByText("Ticket number 1")).toBeNull();
+    expect(screen.getByText("11–20 of 100")).toBeDefined();
+    expect(screen.getByText("Page 2 of 10")).toBeDefined();
+  });
+
+  it("follows the cursor the previous page returned", async () => {
+    responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 100)));
+    renderWithQuery(<TicketListPage />);
+    await screen.findByText("Ticket number 1");
+
+    responders.push(jsonResponse(pageOf(tenRows(11), "cursor-3", 100)));
+    await userEvent.click(screen.getByRole("button", { name: /Next/ }));
+    await screen.findByText("Ticket number 11");
+
+    // Asserting the cursor rather than just "more rows appeared": dropping it
+    // would silently re-fetch page one forever, which looks like nothing.
+    expect(requestedUrls[1]).toBe("/api/tickets?cursor=cursor-2");
+  });
+
+  it("goes back without hitting the network again", async () => {
+    responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 100)));
+    renderWithQuery(<TicketListPage />);
+    await screen.findByText("Ticket number 1");
+
+    responders.push(jsonResponse(pageOf(tenRows(11), "cursor-3", 100)));
+    await userEvent.click(screen.getByRole("button", { name: /Next/ }));
+    await screen.findByText("Ticket number 11");
+
+    const requestsBeforePrev = requestedUrls.length;
+    await userEvent.click(screen.getByRole("button", { name: /Prev/ }));
+
+    expect(await screen.findByText("Ticket number 1")).toBeDefined();
+    // Pages already walked are still in the query cache, so Prev is an index
+    // change. A request here would mean the cache is being thrown away.
+    expect(requestedUrls).toHaveLength(requestsBeforePrev);
+  });
+
+  it("disables Prev on the first page and Next on the last", async () => {
+    responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 20)));
+    renderWithQuery(<TicketListPage />);
+    await screen.findByText("Ticket number 1");
+
+    expect(
+      screen.getByRole("button", { name: /Prev/ }).hasAttribute("disabled"),
+    ).toBe(true);
+
+    responders.push(jsonResponse(pageOf(tenRows(11), null, 20)));
+    await userEvent.click(screen.getByRole("button", { name: /Next/ }));
+    await screen.findByText("Ticket number 11");
+
+    expect(screen.getByText("Page 2 of 2")).toBeDefined();
+    expect(
+      screen.getByRole("button", { name: /Next/ }).hasAttribute("disabled"),
+    ).toBe(true);
+    expect(
+      screen.getByRole("button", { name: /Prev/ }).hasAttribute("disabled"),
+    ).toBe(false);
+  });
+
+  it("reports a short final page honestly", async () => {
+    // 24 tickets over three pages, the last holding four. The range has to come
+    // from the rows in hand, not from the page size, or it claims 21–30 of 24.
+    responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 24)));
+    renderWithQuery(<TicketListPage />);
+    await screen.findByText("Ticket number 1");
+
+    responders.push(jsonResponse(pageOf(tenRows(11), "cursor-3", 24)));
+    await userEvent.click(screen.getByRole("button", { name: /Next/ }));
+    await screen.findByText("Ticket number 11");
+
+    responders.push(jsonResponse(pageOf(tenRows(21).slice(0, 4), null, 24)));
+    await userEvent.click(screen.getByRole("button", { name: /Next/ }));
+    await screen.findByText("Ticket number 21");
+
+    expect(screen.getByText("21–24 of 24")).toBeDefined();
+    expect(screen.getByText("Page 3 of 3")).toBeDefined();
+  });
+
+  it("returns to page 1 when a filter changes", async () => {
+    responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 100)));
+    renderWithQuery(<TicketListPage />);
+    await screen.findByText("Ticket number 1");
+
+    responders.push(jsonResponse(pageOf(tenRows(11), "cursor-3", 100)));
+    await userEvent.click(screen.getByRole("button", { name: /Next/ }));
+    await screen.findByText("Ticket number 11");
+    expect(screen.getByText("Page 2 of 10")).toBeDefined();
+
+    // Page 2 of the resolved tickets is not page 2 of all of them, and the
+    // filtered queue may not even have a page 2 — staying put would render an
+    // empty table under a "Page 2 of 1" counter.
+    responders.push(jsonResponse(pageOf(tenRows(1).slice(0, 3), null, 3)));
+    await userEvent.click(screen.getByRole("combobox", { name: /status/i }));
+    await userEvent.click(
+      await screen.findByRole("option", { name: "resolved" }),
+    );
+
+    expect(await screen.findByText("Page 1 of 1")).toBeDefined();
+    expect(screen.getByText("1–3 of 3")).toBeDefined();
+  });
+
+  it("returns to page 1 when the sort changes", async () => {
+    responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 100)));
+    renderWithQuery(<TicketListPage />);
+    await screen.findByText("Ticket number 1");
+
+    responders.push(jsonResponse(pageOf(tenRows(11), "cursor-3", 100)));
+    await userEvent.click(screen.getByRole("button", { name: /Next/ }));
+    await screen.findByText("Ticket number 11");
+
+    // A cursor names a position in one ordering and means nothing in another.
+    responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 100)));
+    await userEvent.click(screen.getByRole("button", { name: /Subject/ }));
+
+    expect(await screen.findByText("Page 1 of 10")).toBeDefined();
+    expect(requestedUrls).toContain("/api/tickets?sort=subject&order=asc");
   });
 });

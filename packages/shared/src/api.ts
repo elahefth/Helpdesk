@@ -91,6 +91,16 @@ export const ticketDetailSchema = ticketSummarySchema.extend({
 export type TicketDetail = z.infer<typeof ticketDetailSchema>;
 
 /**
+ * Rows per page in the ticket queue, and the API's default `limit`.
+ *
+ * One constant rather than two matching numbers: the SPA divides `total` by it
+ * to render "Page 3 of 10", so a server default that disagreed with the client's
+ * page size would produce a page count that is quietly wrong — ten pages
+ * claimed, twenty delivered.
+ */
+export const TICKET_PAGE_SIZE = 10;
+
+/**
  * The columns `GET /api/tickets` will sort by, and the ids the ticket table's
  * columns carry so a header click maps to one of these without a lookup table
  * in between.
@@ -127,7 +137,12 @@ export const listTicketsQuerySchema = z.object({
   category: ticketCategorySchema.optional(),
   sort: ticketSortKeySchema.default("createdAt"),
   order: z.enum(["asc", "desc"]).default("desc"),
-  limit: z.coerce.number().int().min(1).max(100).default(25),
+  /**
+   * Ten, matching the queue's page size, so a request that omits it gets the
+   * same page the UI would ask for. The ceiling stays at 100 — that is the
+   * export-shaped request, not a page anyone reads.
+   */
+  limit: z.coerce.number().int().min(1).max(100).default(TICKET_PAGE_SIZE),
   cursor: z.string().optional(),
 });
 export type ListTicketsQuery = z.infer<typeof listTicketsQuerySchema>;
@@ -135,6 +150,17 @@ export type ListTicketsQuery = z.infer<typeof listTicketsQuerySchema>;
 export const listTicketsResponseSchema = z.object({
   data: z.array(ticketSummarySchema),
   nextCursor: z.string().nullable(),
+  /**
+   * How many tickets match the filters, ignoring the cursor — the total the
+   * queue is a page of, not the size of this page.
+   *
+   * It costs a second query per request, which cursor pagination exists partly
+   * to avoid, and it is here anyway because "Page 3 of 10" cannot be computed
+   * from a cursor. A cursor knows there is a next page; it has no idea how many
+   * follow. The alternative is a Prev/Next pair with no sense of where you are
+   * in the queue, which is worse than the count is expensive at this size.
+   */
+  total: z.number().int().nonnegative(),
 });
 export type ListTicketsResponse = z.infer<typeof listTicketsResponseSchema>;
 

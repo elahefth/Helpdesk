@@ -13,6 +13,7 @@ import {
 import {
   CATEGORY_LABELS,
   TICKET_CATEGORIES,
+  TICKET_PAGE_SIZE,
   TICKET_STATUSES,
   type TicketCategory,
   type TicketSortKey,
@@ -169,6 +170,26 @@ export function TicketListPage() {
   const [status, setStatus] = useState<TicketStatus | "all">("all");
   const [category, setCategory] = useState<TicketCategory | "all">("all");
   const [sorting, setSorting] = useState<SortingState>(DEFAULT_SORT);
+  const [pageIndex, setPageIndex] = useState(0);
+
+  /**
+   * Every control that changes the ordering or the set of rows also sends the
+   * reader back to page 1, because the page they were on does not survive it:
+   * page 3 of the open tickets is not page 3 of all of them, and a cursor from
+   * one ordering names a position in a list the next ordering does not have.
+   * Leaving `pageIndex` alone would show page 3 of a two-page result as empty.
+   */
+  // Base UI types the value as nullable — a Select can be cleared — but neither
+  // of these can be: both carry an explicit "all" item and no clear affordance.
+  const handleStatusChange = (value: TicketStatus | "all" | null) => {
+    setStatus(value ?? "all");
+    setPageIndex(0);
+  };
+
+  const handleCategoryChange = (value: TicketCategory | "all" | null) => {
+    setCategory(value ?? "all");
+    setPageIndex(0);
+  };
 
   // `sorting` is an array TanStack replaces on every toggle, so it cannot go
   // into a query key directly — a new array with identical contents would
@@ -204,19 +225,59 @@ export function TicketListPage() {
     getNextPageParam: (last) => last.nextCursor ?? undefined,
   });
 
-  // Memoised because TanStack Table treats a new `data` identity as new rows;
-  // flatMap on every render would rebuild the row model each time.
+  /**
+   * One page, not every page fetched so far.
+   *
+   * `useInfiniteQuery` accumulates — that is its whole purpose — and this is
+   * where the accumulation stops being what the screen shows. Every page the
+   * user has walked through stays in `data.pages`, which is exactly what makes
+   * Prev instant and free: going back is an index change, not a request. Only
+   * Next can need the network, and only the first time.
+   *
+   * Memoised because TanStack Table treats a new `data` identity as new rows,
+   * and would rebuild the row model on every unrelated render otherwise.
+   */
   const tickets = useMemo(
-    () => data?.pages.flatMap((page) => page.data) ?? [],
-    [data],
+    () => data?.pages[pageIndex]?.data ?? [],
+    [data, pageIndex],
   );
+
+  // `total` is the same on every page — it counts what matches the filters, not
+  // what is on screen — so reading it off the first is not a shortcut.
+  const total = data?.pages[0]?.total ?? 0;
+  const pageCount = Math.ceil(total / TICKET_PAGE_SIZE);
+  const firstRow = pageIndex * TICKET_PAGE_SIZE + 1;
+  const lastRow = Math.min(firstRow + tickets.length - 1, total);
+
+  // A page that has not been fetched yet is one `fetchNextPage` away, because
+  // pages are only ever walked one at a time. `hasNextPage` is the cursor's
+  // answer and `pageCount` is the count's; they agree, and trusting the cursor
+  // here means Next is never offered for a page the server cannot produce.
+  const isLastPage = pageIndex >= pageCount - 1;
+  const canGoNext =
+    !isLastPage && (pageIndex + 1 < (data?.pages.length ?? 0) || hasNextPage);
+
+  const goNext = () => {
+    if (!canGoNext) return;
+    // Already fetched — Prev then Next costs nothing.
+    if (pageIndex + 1 < (data?.pages.length ?? 0)) {
+      setPageIndex(pageIndex + 1);
+      return;
+    }
+    void fetchNextPage().then(() => setPageIndex((index) => index + 1));
+  };
 
   const table = useTable({
     features,
     data: tickets,
     columns,
     state: { sorting },
-    onSortingChange: setSorting,
+    // Not `setSorting` directly: a new ordering makes the current page index
+    // meaningless, and TanStack hands the updater straight through.
+    onSortingChange: (updater) => {
+      setSorting(updater);
+      setPageIndex(0);
+    },
     // States the intent, and is the belt to the omitted sortedRowModel's
     // braces: on its own it changes nothing here, because there is no sorted
     // row model for it to switch off. It earns its place the day someone adds
@@ -245,7 +306,7 @@ export function TicketListPage() {
         <Select
           items={STATUS_ITEMS}
           value={status}
-          onValueChange={(value) => setStatus(value as TicketStatus | "all")}
+          onValueChange={handleStatusChange}
         >
           <SelectTrigger id="status" className="min-w-32">
             <SelectValue />
@@ -267,9 +328,7 @@ export function TicketListPage() {
         <Select
           items={CATEGORY_ITEMS}
           value={category}
-          onValueChange={(value) =>
-            setCategory(value as TicketCategory | "all")
-          }
+          onValueChange={handleCategoryChange}
         >
           <SelectTrigger id="category" className="min-w-44">
             <SelectValue />
@@ -329,16 +388,43 @@ export function TicketListPage() {
             </table>
           </div>
 
-          {hasNextPage && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void fetchNextPage()}
-              disabled={isFetchingNextPage}
-            >
-              {isFetchingNextPage ? "Loading…" : "Load more"}
-            </Button>
-          )}
+          <nav
+            aria-label="Ticket pages"
+            className="flex flex-wrap items-center justify-between gap-3"
+          >
+            {/*
+              The range, not just the page number. "Page 3 of 10" tells a reader
+              where they are; "21–30 of 100" tells them how much is left, which
+              is the question someone working a queue actually has.
+            */}
+            <p className="text-sm text-muted-foreground" aria-live="polite">
+              {firstRow}–{lastRow} of {total}
+            </p>
+
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPageIndex((index) => Math.max(0, index - 1))}
+                disabled={pageIndex === 0}
+              >
+                ‹ Prev
+              </Button>
+              <span className="text-sm tabular-nums text-muted-foreground">
+                Page {pageIndex + 1} of {pageCount}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={goNext}
+                // Disabled while the next page is in flight, so a second click
+                // cannot queue a second fetch and skip a page on arrival.
+                disabled={!canGoNext || isFetchingNextPage}
+              >
+                {isFetchingNextPage ? "Loading…" : "Next ›"}
+              </Button>
+            </div>
+          </nav>
         </div>
       )}
     </section>
