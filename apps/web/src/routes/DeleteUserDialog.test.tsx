@@ -140,6 +140,38 @@ describe("DeleteUserDialog", () => {
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
   });
 
+  /**
+   * The assignee picker on the ticket detail page holds this account, under a
+   * five-minute `staleTime` — long, because the staff list barely changes. So
+   * an admin who deletes a colleague and then opens a ticket would still be
+   * offered them until the entry aged out. `["ticket"]` and `["tickets"]` go
+   * with it because the DELETE unassigns that account's tickets server-side and
+   * restamps their `updated_at`, which the queue's default sort orders by.
+   *
+   * Asserted as `isInvalidated` rather than as a refetch: none of these queries
+   * is mounted here, so nothing re-fetches now — they are marked stale and
+   * fetched again when the reader next lands on them, which is exactly the
+   * behaviour being pinned.
+   */
+  it("marks the assignee picker and the tickets stale", async () => {
+    responders.push(jsonResponse(DELETED));
+
+    const user = userEvent.setup();
+    const { queryClient } = renderWithQuery(<DeleteUserDialog user={BEN} />);
+    for (const key of [["users"], ["assignees"], ["ticket"], ["tickets"]]) {
+      queryClient.setQueryData(key, { data: [] });
+    }
+
+    await user.click(screen.getByRole("button", { name: "Delete Ben Agent" }));
+    await confirm(user);
+
+    await waitFor(() => {
+      for (const key of [["users"], ["assignees"], ["ticket"], ["tickets"]]) {
+        expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
+      }
+    });
+  });
+
   it("sends nothing when the admin cancels", async () => {
     const user = userEvent.setup();
     await openDialog(user);

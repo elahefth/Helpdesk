@@ -50,6 +50,23 @@ export function DeleteUserDialog({ user }: { user: UserSummary }) {
     // Prefix match over ["users", { role }], so every cached filter drops the
     // row rather than only the one on screen.
     void queryClient.invalidateQueries({ queryKey: ["users"] });
+
+    // The ticket detail page's assignee picker is a different cache entry, and
+    // it holds this account. `staleTime` there is five minutes — long, because
+    // the staff list barely changes and every ticket opened would otherwise
+    // re-fetch it — so without this an admin who deletes a colleague and then
+    // opens a ticket is still offered them, for as long as it takes the entry
+    // to age out. The delete is exactly the event that makes it wrong.
+    void queryClient.invalidateQueries({ queryKey: ["assignees"] });
+
+    // DELETE /api/users/:id also unassigns every ticket the account owned, so
+    // any cached ticket naming them is stale, and so is the queue: the same
+    // UPDATE restamps `updated_at`, which is what the default sort orders by.
+    // Both are invalidated by prefix and neither is mounted right now, so they
+    // are marked stale and re-fetched when the reader next lands on them.
+    void queryClient.invalidateQueries({ queryKey: ["ticket"] });
+    void queryClient.invalidateQueries({ queryKey: ["tickets"] });
+
     setOpen(false);
   };
 
@@ -83,8 +100,9 @@ export function DeleteUserDialog({ user }: { user: UserSummary }) {
           <AlertDialogTitle>Delete {user.name}?</AlertDialogTitle>
           <AlertDialogDescription>
             {user.email} will lose access immediately and any active session
-            ends. The account is kept so past work still shows who did it, and
-            its email address stays reserved.
+            ends. Tickets assigned to them go back to the unassigned pool. The
+            account is kept so past work still shows who did it, and its email
+            address stays reserved.
           </AlertDialogDescription>
         </AlertDialogHeader>
 

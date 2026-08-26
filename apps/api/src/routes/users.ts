@@ -15,7 +15,7 @@ import {
 } from "@helpdesk/shared";
 import type { Auth } from "../auth.ts";
 import type { Database } from "../db/client.ts";
-import { session, user } from "../db/schema.ts";
+import { session, ticket, user } from "../db/schema.ts";
 import { HttpError } from "../middleware/errors.ts";
 import { requireRole } from "../middleware/require-role.ts";
 
@@ -289,11 +289,12 @@ export function createUsersRouter(
    * `seed:admin` has created exactly one account, an admin — with nobody to
    * assign anything to.
    *
-   * Deleted accounts are not, which is the one asymmetry worth knowing: a
-   * soft-deleted assignee stays assigned and stays rendered on the ticket (the
-   * user row survives a delete so a ticket can still name who handled it), but
-   * cannot be *chosen* again. The queue's answer to a departed colleague is to
-   * reassign their tickets, not to have them silently become unowned.
+   * Deleted accounts are not. They cannot be chosen, and by the time this list
+   * is fetched they own nothing either: DELETE /api/users/:id unassigns their
+   * tickets in the same transaction that marks the row. The filter and that
+   * UPDATE are two halves of one rule — a departed colleague is not somewhere
+   * work can be sent, whether newly or still. Rows assigned before that
+   * behaviour landed are the exception the SPA's picker still folds in.
    *
    * Unpaginated, unlike GET /users. A picker needs every option at once — a
    * cursor would mean the person you are looking for might be on a page the
@@ -469,12 +470,14 @@ export function createUsersRouter(
   });
 
   /**
-   * Soft-delete a staff account: stamp `deletedAt` and end its sessions.
+   * Soft-delete a staff account: stamp `deletedAt`, end its sessions, and
+   * release the tickets it owns back to the unassigned pool.
    *
    * The row is kept rather than removed because `session` and `account` cascade
-   * from it, and because a ticket assigned to someone who has left still has to
-   * name them once Phase 7 lands. What "deleted" means is enforced in three
-   * places, and all three are needed: the reads in this file skip marked rows,
+   * from it, and because past work — a reply's byline, a resolved ticket — still
+   * has to name whoever did it. Ownership is the part that does not survive:
+   * see the UPDATE below. What "deleted" means is enforced in three places, and
+   * all three are needed: the reads in this file skip marked rows,
    * `databaseHooks.session.create.before` in auth.ts refuses them a new session,
    * and `requireAuth` refuses one that somehow still holds an old one.
    */
@@ -504,11 +507,12 @@ export function createUsersRouter(
       throw HttpError.forbidden("Admin accounts cannot be deleted.");
     }
 
-    // Both statements are Drizzle's, so unlike the password write in PATCH they
-    // *can* share a transaction — and they must. Marking the row without
+    // All three statements are Drizzle's, so unlike the password write in PATCH
+    // they *can* share a transaction — and they must. Marking the row without
     // clearing its sessions would leave a deleted account signed in until its
     // cookie expired; clearing sessions without marking the row would sign
-    // someone out of an account that still exists.
+    // someone out of an account that still exists; and releasing their tickets
+    // without marking the row would hand a working account's queue away.
     const [row] = await db.transaction(async (tx) => {
       const marked = await tx
         .update(user)
@@ -521,6 +525,29 @@ export function createUsersRouter(
 
       if (marked[0]) {
         await tx.delete(session).where(eq(session.userId, id.data));
+
+        // Deleting a colleague releases their queue. `assigned_to_id` is the
+        // one thing a soft delete has to actively undo: the surviving row lets
+        // a ticket still name who *handled* it, but an assignee is a statement
+        // about who is going to work it next, and nobody is. Left alone, their
+        // tickets would sit owned by someone who cannot sign in, invisible to
+        // the "unassigned" reading of the queue and unreachable through
+        // GET /api/assignees, which omits them — so the only way to notice one
+        // is to open it.
+        //
+        // The FK's `on delete set null` does not cover this: it fires on a row
+        // being removed, and this row is not removed. Replies are the opposite
+        // case and keep their author — a byline is a record of what happened,
+        // not an outstanding claim on work.
+        //
+        // `ticket.updatedAt` is `$onUpdate`, so these tickets rise to the top
+        // of the queue's default sort. That is the wanted behaviour here, and
+        // the same thing a PATCH that unassigned one by hand would do: they
+        // just became work with no owner.
+        await tx
+          .update(ticket)
+          .set({ assignedToId: null })
+          .where(eq(ticket.assignedToId, id.data));
       }
 
       return marked;

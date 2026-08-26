@@ -51,9 +51,7 @@ export type UserSummary = z.infer<typeof userSummarySchema>;
 
 /**
  * A ticket as the list view needs it. One row is one email that arrived at the
- * support address. A ticket has a reply thread now, and there is deliberately
- * no reply count here — the queue does not show one, and counting replies per
- * row would put a correlated subquery on every list request to render nothing.
+ * support address; there is no thread yet, so there is no message count.
  *
  * The assignee is deliberately *not* here, and its absence is the same
  * judgement `body`'s is: the queue does not show who owns a ticket, so putting

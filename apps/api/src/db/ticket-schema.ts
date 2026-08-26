@@ -70,10 +70,13 @@ export const ticket = pgTable(
      * `on delete set null` rather than `cascade` (which would delete tickets)
      * or `restrict` (which would make a user undeletable). It should never
      * fire: DELETE /api/users/:id is a soft delete and marks the row instead,
-     * which is deliberate — the user row survives precisely so a ticket can
-     * still name who handled it. So a soft-deleted assignee stays assigned and
-     * stays rendered, and the constraint covers only the case where someone
-     * removes a row by hand.
+     * so the constraint covers only the case where someone removes a row by
+     * hand. That route does the same thing by hand for the case that actually
+     * happens — it clears this column for every ticket the deleted account
+     * owned, in the transaction that marks the row. An assignee is a claim on
+     * work nobody is going to do once its owner cannot sign in, unlike
+     * `ticket_reply.author_id`, which records something that already happened
+     * and therefore stays.
      *
      * No index, on the same reasoning the search's `ilike` carries: nothing
      * queries by this column yet. The queue neither shows nor filters by the

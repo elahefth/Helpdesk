@@ -281,17 +281,20 @@ function TicketControls({ ticket }: { ticket: TicketDetail }) {
   const staff = assignees?.data ?? [];
 
   /**
-   * The assignee options, with the current one folded in when the staff list
-   * does not carry them.
+   * The assignee options: everyone who can be assigned, plus the current owner
+   * as a `hidden` entry when the staff list does not carry them.
    *
-   * That case is real rather than defensive: a soft-deleted account stays
-   * assigned to its tickets — the user row survives a delete precisely so a
-   * ticket can still name who handled it — but `GET /api/assignees` omits it,
-   * because new work should not be handed to someone who has left. Base UI
-   * renders the trigger's label out of `items`, so without the merge an owned
-   * ticket would show an empty box and read as unassigned.
+   * That last case is a ticket owned by an account `GET /api/assignees` omits —
+   * a soft-deleted colleague. Deleting one unassigns their tickets in the same
+   * transaction now, so it means a row assigned before that landed. It is
+   * `hidden` rather than a plain item because the two halves have to be true at
+   * once: a departed colleague must not appear among the choices, and Base UI
+   * renders the trigger's label out of `items`, so dropping them outright would
+   * leave the box empty and read as unassigned — the one thing the picker must
+   * not say about a ticket that names an owner. Hidden, the name shows until
+   * someone picks a real assignee, and there is no way back to it.
    */
-  const assigneeItems = [
+  const assigneeItems: SelectItemSpec[] = [
     { label: "Unassigned", value: NONE },
     ...staff.map((person) => ({
       label: assigneeLabel(person, session?.user.id),
@@ -302,6 +305,7 @@ function TicketControls({ ticket }: { ticket: TicketDetail }) {
           {
             label: assigneeLabel(ticket.assignee, session?.user.id),
             value: ticket.assignee.id,
+            hidden: true,
           },
         ]
       : []),
@@ -427,6 +431,16 @@ interface SelectItemSpec {
   label: string;
   value: string;
   disabled?: boolean;
+  /**
+   * Kept out of the listbox but still passed to `Select`, which is the seam
+   * between the two things `items` does: it maps the current value to the
+   * trigger's label, *and* it is the list of choices. A value that must render
+   * but must not be offered — see `assigneeItems` — needs the first without the
+   * second. Distinct from `disabled`, which is for a choice a reader should see
+   * and understand they cannot make (the status select's terminal `closed`);
+   * this is for one that is not a choice at all.
+   */
+  hidden?: boolean;
 }
 
 /**
@@ -466,15 +480,17 @@ function TicketSelect({
       </SelectTrigger>
       <SelectContent>
         <SelectGroup>
-          {items.map((item) => (
-            <SelectItem
-              key={item.value}
-              value={item.value}
-              disabled={item.disabled}
-            >
-              {item.label}
-            </SelectItem>
-          ))}
+          {items
+            .filter((item) => !item.hidden)
+            .map((item) => (
+              <SelectItem
+                key={item.value}
+                value={item.value}
+                disabled={item.disabled}
+              >
+                {item.label}
+              </SelectItem>
+            ))}
         </SelectGroup>
       </SelectContent>
     </Select>

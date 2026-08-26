@@ -86,11 +86,13 @@ function matchesSearch(term: string): SQL | undefined {
  * tickets are unassigned, and an inner join would answer "no such ticket" for
  * every one of them.
  *
- * It deliberately does **not** filter `user.deletedAt`. A soft-deleted staff
- * account keeps its row precisely so a ticket can still name who handled it, so
- * hiding a deleted assignee here would silently redraw an owned ticket as
- * unassigned — the one reading that makes the surviving row pointless. They can
- * no longer be *chosen*: that is `GET /api/assignees`' job, and it does filter.
+ * It deliberately does **not** filter `user.deletedAt`, even though
+ * `DELETE /api/users/:id` now unassigns a departed colleague's tickets, so the
+ * join should not meet one. Filtering here would mean answering the leftovers —
+ * rows assigned before that behaviour landed, or an id written some other way —
+ * by silently redrawing an owned ticket as unassigned, which is a worse answer
+ * than naming someone who has left. Which is also why they are still
+ * unchoosable: that is `GET /api/assignees`' job, and it does filter.
  *
  * Shared by GET and PATCH so the two cannot drift into describing the same
  * ticket differently.

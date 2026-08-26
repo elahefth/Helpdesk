@@ -712,13 +712,16 @@ describe("TicketDetailPage", () => {
     });
 
     /**
-     * A soft-deleted account keeps its tickets — the user row survives a delete
-     * precisely so a ticket can name who handled it — but is not offered as a
-     * new assignee. Base UI renders the trigger's label out of `items`, so
-     * without folding the current assignee in, an owned ticket would show an
-     * empty box and read as unassigned.
+     * An assignee `GET /api/assignees` does not carry — a soft-deleted
+     * colleague on a ticket assigned before the delete route started
+     * unassigning them. Both halves matter and they pull opposite ways: the
+     * trigger has to keep naming them, because Base UI renders its label out of
+     * `items` and an empty box would read as unassigned, while the listbox must
+     * not offer them, because handing new work to someone who has left is the
+     * thing `GET /api/assignees`' filter exists to prevent. That is what the
+     * `hidden` item spec is for.
      */
-    it("still names an assignee who is no longer assignable", async () => {
+    it("names an assignee who is no longer assignable, without offering them", async () => {
       const departed = {
         id: "77777777-7777-4777-8777-777777777777",
         name: "Eve Former",
@@ -732,6 +735,18 @@ describe("TicketDetailPage", () => {
       await screen.findByRole("heading", { name: /Cannot log in/ });
 
       expect(shown(ASSIGNEE)).toContain("Eve Former");
+
+      await userEvent.click(screen.getByRole("combobox", { name: ASSIGNEE }));
+
+      // Awaited on a colleague who *is* offered, so the listbox is open before
+      // the absence below is asserted — a queryBy against an unopened popup
+      // passes for the wrong reason.
+      expect(
+        await screen.findByRole("option", { name: "Cass Agent" }),
+      ).toBeDefined();
+      expect(
+        screen.queryByRole("option", { name: "Eve Former" }),
+      ).toBeNull();
     });
   });
 });

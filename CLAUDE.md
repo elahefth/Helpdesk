@@ -125,7 +125,7 @@ Staff-only console: students never log in. Sessions live in the `session` table 
 - `seed.ts` is idempotent and **never changes an existing account's password** — re-running only corrects the role. There is no password-reset path in the repo.
 - **`POST /api/users` is the second door**, and the only one over HTTP: admin-gated, and it reaches Better Auth through the same in-process seam (`auth.api.signUpEmail({ body })` with no `headers`/`request` — forwarding the Express `req` would trip the gate above and answer "Sign up is disabled"). Accounts it creates are always `agent`, because `role` is `input: false`. Two consequences worth knowing before touching it: `emailAndPassword.autoSignIn` must stay on, since turning it off switches Better Auth's duplicate-email reply to a *synthetic* user and the route would report success while creating nothing; and because it is on, sign-up writes a session row for an account nobody has signed into, which the route deletes to keep "a session row means someone is signed in" true.
 - **`PATCH /api/users/:id` edits one**, admin-gated the same way. Name and email are plain columns and are written with Drizzle; the password is not, and goes through `auth.$context` (`password.hash` + `internalAdapter.updatePassword`, creating the `credential` row if one is somehow missing). That mirrors what Better Auth's admin plugin does in `setUserPassword` — mirrored rather than adopted, because enabling that plugin to reach one function would also mount `/api/admin/*`: set-role, ban, impersonate. Three things about it are load-bearing. **A blank or whitespace-only password means "leave it alone"**, normalised to `undefined` by `updateUserBodySchema` so the route has one case to branch on. **A password change deletes the target's session rows**, including the admin's own when they edit themselves — otherwise resetting a compromised account leaves the intruder holding a valid multi-day cookie, and no `cookieCache` is exactly what makes deleting rows sufficient. **The two writes are not atomic** (Better Auth's adapter holds its own handle), so the row is written *first*: a failed password write leaves a retryable state, whereas the reverse order could answer a duplicate-email 409 after the password had already changed.
-- **`DELETE /api/users/:id` is a soft delete**, admin-gated, and **admin accounts are exempt** — the route answers 403 for a target whose role is `admin`, which is the actual rule; the SPA merely omits the button. The row survives because `session` and `account` cascade from it and because Phase 7's tickets will need to name whoever handled them. Three things enforce what "deleted" means, and all three are load-bearing: every read in `routes/users.ts` carries `isNull(user.deletedAt)` (so a marked row is unlistable *and* uneditable), `databaseHooks.session.create.before` in `auth.ts` refuses the account a new session, and `requireAuth` refuses one that still holds an old one. Guarding `/sign-in/email` instead of the session insert would have left every future credential or social route open by default. The hook throws Better Auth's own `INVALID_EMAIL_OR_PASSWORD` verbatim so a deleted account is indistinguishable from a wrong password. Unlike PATCH's password write, both statements here are Drizzle's, so they share a **transaction** — marking the row without clearing sessions would leave a deleted account signed in until its cookie expired.
+- **`DELETE /api/users/:id` is a soft delete**, admin-gated, and **admin accounts are exempt** — the route answers 403 for a target whose role is `admin`, which is the actual rule; the SPA merely omits the button. The row survives because `session` and `account` cascade from it and because past work — a reply's byline, a resolved ticket — still has to name whoever did it. Ownership is the part that does not survive: the same transaction clears `ticket.assigned_to_id` for every ticket the account owned, because an assignee is a claim on work nobody is going to do once its owner cannot sign in. Three things enforce what "deleted" means, and all three are load-bearing: every read in `routes/users.ts` carries `isNull(user.deletedAt)` (so a marked row is unlistable *and* uneditable), `databaseHooks.session.create.before` in `auth.ts` refuses the account a new session, and `requireAuth` refuses one that still holds an old one. Guarding `/sign-in/email` instead of the session insert would have left every future credential or social route open by default. The hook throws Better Auth's own `INVALID_EMAIL_OR_PASSWORD` verbatim so a deleted account is indistinguishable from a wrong password. Unlike PATCH's password write, all three statements here are Drizzle's, so they share a **transaction** — marking the row without clearing sessions would leave a deleted account signed in until its cookie expired, and releasing the tickets without marking the row would hand a working account's queue away.
 - **`deletedAt` is declared in `auth.ts` as a `user.additionalFields` entry, not added to `db/auth-schema.ts`.** That file is generated; a hand-added column disappears the next time anyone regenerates it. Declaring the field is what makes `@better-auth/cli generate` emit it, and it is `input: false` so no payload can set or clear it. The regeneration added exactly one line. It also means `deletedAt` rides along on the session user, which is what lets `requireAuth` check it.
 - **A deleted user keeps its email.** `user.email` is still UNIQUE, so the address stays reserved and re-creating that person fails — `emailConflict` in `routes/users.ts` answers "That email belongs to a deleted user" rather than the generic duplicate message, because otherwise an admin is told an address is taken by someone who appears in no list. There is no restore path; adding one is the natural way to make the address reachable again.
 - **Email is stored lowercased, and that is load-bearing.** Better Auth lowercases the address at sign-up and its `findUserByEmail` lowercases the address it is *given* before comparing it to the column, so a row whose email carries a capital is unreachable by every sign-in — and a password reset does not recover it, because the lookup fails before a password is checked. Creating a user goes through Better Auth and is normalised for free; `PATCH /api/users/:id` writes the column directly and is not, so the `.toLowerCase()` lives on the shared `email` field in `packages/shared/src/api.ts`, where both routes and both forms pick it up. `packages/shared/src/api.test.ts` pins it. Anything else that writes `user.email` directly must normalise too.
@@ -190,7 +190,8 @@ opening it.
   unassigned pool every ticket arrives in — nothing routes, so an owner is
   always a human decision, the same reasoning `category` carries. `on delete set
   null` should never fire: `DELETE /api/users/:id` is a soft delete, so the
-  constraint covers only a row someone removes by hand. **There is no index on
+  constraint covers only a row someone removes by hand — that route clears the
+  column itself for the case that actually happens. **There is no index on
   it**, on the stated policy the search's `ilike` follows: nothing queries by
   the column yet, and an "assigned to" filter is what would justify the write
   cost.
@@ -212,14 +213,28 @@ opening it.
   The route skips the UPDATE entirely when `assigneeId` is absent, so an empty
   PATCH cannot bump `updatedAt` through `$onUpdate` and move the ticket in the
   queue's default sort.
-- **A soft-deleted assignee stays assigned, and that asymmetry is the point.**
-  `findTicketDetail` does *not* filter `user.deletedAt` — the user row survives
-  a delete precisely so a ticket can name who handled it, and hiding a departed
-  owner would silently redraw an owned ticket as unassigned. `GET /api/assignees`
-  *does* filter, so they cannot be chosen again. The SPA folds the current
-  assignee into the picker's `items` for exactly that gap: Base UI renders the
-  trigger's label out of `items`, so without the merge an owned ticket shows an
-  empty box.
+- **Deleting a colleague releases their queue.** `DELETE /api/users/:id`
+  unassigns every ticket the account owned, in the transaction that marks the
+  row — unlike `ticket_reply.author_id`, which records something that already
+  happened and stays. Left alone, those tickets would sit owned by someone who
+  cannot sign in, absent from the "unassigned" reading of the queue and
+  unreachable through `GET /api/assignees`, so the only way to find one is to
+  open it. It restamps `updated_at` through `$onUpdate` and moves them up the
+  queue's default sort, which is wanted: they just became work with no owner.
+  Two things downstream still handle a deleted assignee, for rows assigned
+  before this landed. `findTicketDetail` does *not* filter `user.deletedAt` —
+  answering with a departed owner is better than silently redrawing an owned
+  ticket as unassigned — and the SPA folds the current assignee into the
+  picker's `items` as a **`hidden`** entry, since Base UI renders the trigger's
+  label out of `items` and without the merge such a ticket shows an empty box.
+  `hidden` keeps it out of the listbox while leaving that label resolvable,
+  which is the whole point: a departed colleague is named on the ticket they
+  own and offered on none. It is distinct from `disabled` beside it, which is
+  for a choice a reader should see and understand they cannot make (the status
+  select's terminal `closed`). And `DeleteUserDialog` invalidates
+  `["assignees"]`, `["ticket"]` and `["tickets"]` alongside `["users"]` — the
+  picker's `staleTime` is five minutes, so without the first an admin who
+  deletes a colleague is still offered them on the next ticket they open.
 - **`GET /api/assignees` is unpaginated and open to every signed-in agent**,
   which is what distinguishes it from the admin-gated `GET /api/users` beside
   it. A picker needs every option at once — a cursor means the person you want
