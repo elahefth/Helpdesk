@@ -6,7 +6,10 @@ export const healthRouter: Router = Router();
 
 /** Liveness: is the process up? Never touches dependencies. */
 healthRouter.get("/healthz", (_req, res) => {
-  const body: Health = { status: "ok", uptimeSeconds: Math.round(process.uptime()) };
+  const body: Health = {
+    status: "ok",
+    uptimeSeconds: Math.round(process.uptime()),
+  };
   res.json(body);
 });
 

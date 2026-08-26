@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useLocation, useSearchParams } from "react-router";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import {
   createColumnHelper,
@@ -16,6 +16,9 @@ import {
   TICKET_CATEGORIES,
   TICKET_PAGE_SIZE,
   TICKET_STATUSES,
+  ticketCategorySchema,
+  ticketSortKeySchema,
+  ticketStatusSchema,
   type TicketCategory,
   type TicketSortKey,
   type TicketStatus,
@@ -57,12 +60,79 @@ const CATEGORY_ITEMS = [
 const formatCreated = (iso: string) => new Date(iso).toLocaleDateString();
 
 /**
- * Newest first, which is the only default a support queue can have: the thing
- * that arrived while you were reading the last one is the thing you have not
- * seen. It matches `listTicketsQuerySchema`'s own default, so the first request
- * carries no sort params at all.
+ * Everything that decides which rows are on screen, as one object.
+ *
+ * It lives in the URL rather than in `useState`, because this component
+ * unmounts every time a reader opens a ticket. State held in the component dies
+ * with it, so coming back from a ticket landed on page 1 of an unfiltered queue
+ * no matter where the reader had been standing. In the query string it survives
+ * the round trip and a reload, it makes the browser's own Back button restore
+ * the page rather than reset it, and a position in the queue becomes something
+ * an agent can paste to a colleague.
+ *
+ * `createdAt` desc is newest-first, the only default a support queue can have:
+ * the thing that arrived while you were reading the last one is the thing you
+ * have not seen. It matches `listTicketsQuerySchema`'s own default, which is
+ * why an untouched queue sends no sort params at all.
  */
-const DEFAULT_SORT: SortingState = [{ id: "createdAt", desc: true }];
+type QueueState = {
+  status: TicketStatus | "all";
+  category: TicketCategory | "all";
+  search: string;
+  sortKey: TicketSortKey;
+  sortOrder: "asc" | "desc";
+  /** Zero-based here, one-based in the URL — `?page=1` is the first page. */
+  pageIndex: number;
+};
+
+const DEFAULT_QUEUE: QueueState = {
+  status: "all",
+  category: "all",
+  search: "",
+  sortKey: "createdAt",
+  sortOrder: "desc",
+  pageIndex: 0,
+};
+
+/**
+ * Reads the params through the shared schemas, and falls back rather than
+ * throwing: a hand-edited or stale URL should show the queue, not an error
+ * screen. Every request is then built from the *parsed* value, so a bogus
+ * `?status=pending` can never reach the API.
+ */
+function readQueueState(params: URLSearchParams): QueueState {
+  const page = Number(params.get("page"));
+
+  return {
+    status: ticketStatusSchema.safeParse(params.get("status")).data ?? "all",
+    category:
+      ticketCategorySchema.safeParse(params.get("category")).data ?? "all",
+    search: params.get("q")?.trim() ?? "",
+    sortKey:
+      ticketSortKeySchema.safeParse(params.get("sort")).data ??
+      DEFAULT_QUEUE.sortKey,
+    sortOrder: params.get("order") === "asc" ? "asc" : "desc",
+    pageIndex: Number.isInteger(page) && page > 1 ? page - 1 : 0,
+  };
+}
+
+/**
+ * The inverse, omitting anything still at its default — an untouched queue
+ * stays at a plain "/", and the address only ever names what the reader changed.
+ */
+function writeQueueState(state: QueueState): URLSearchParams {
+  const params = new URLSearchParams();
+  if (state.status !== "all") params.set("status", state.status);
+  if (state.category !== "all") params.set("category", state.category);
+  if (state.search) params.set("q", state.search);
+  if (state.sortKey !== DEFAULT_QUEUE.sortKey)
+    params.set("sort", state.sortKey);
+  if (state.sortOrder !== DEFAULT_QUEUE.sortOrder) {
+    params.set("order", state.sortOrder);
+  }
+  if (state.pageIndex > 0) params.set("page", String(state.pageIndex + 1));
+  return params;
+}
 
 /**
  * TanStack Table v9 is opt-in per feature — nothing is in the bundle unless it
@@ -112,19 +182,7 @@ const columns: ColumnDef<typeof features, TicketSummary, unknown>[] = [
   columnHelper.accessor((row): unknown => row.subject, {
     id: "subject" satisfies TicketSortKey,
     header: "Subject",
-    // The subject is the row's handle: it is what a reader recognises the
-    // ticket by, so it is what opens it. A whole-row click would take the
-    // sender address and the status badge with it and leave no way to select
-    // text in the row; an anchor keeps middle-click, cmd-click and "copy link"
-    // working, which is how a ticket gets handed to someone else.
-    cell: ({ row }) => (
-      <Link
-        to={`/tickets/${row.original.id}`}
-        className="rounded-sm font-medium underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
-      >
-        {row.original.subject}
-      </Link>
-    ),
+    cell: ({ row }) => <SubjectCell ticket={row.original} />,
   }),
   columnHelper.accessor((row): unknown => row.studentName ?? row.studentEmail, {
     id: "sender" satisfies TicketSortKey,
@@ -179,10 +237,45 @@ const columns: ColumnDef<typeof features, TicketSummary, unknown>[] = [
  *
  */
 export function TicketListPage() {
-  const [status, setStatus] = useState<TicketStatus | "all">("all");
-  const [category, setCategory] = useState<TicketCategory | "all">("all");
-  const [sorting, setSorting] = useState<SortingState>(DEFAULT_SORT);
-  const [pageIndex, setPageIndex] = useState(0);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const queue = useMemo(() => readQueueState(searchParams), [searchParams]);
+  const { status, category, search, sortKey, sortOrder, pageIndex } = queue;
+
+  /**
+   * Every control that changes the ordering or the set of rows also sends the
+   * reader back to page 1, because the page they were on does not survive it:
+   * page 3 of the open tickets is not page 3 of all of them, and a cursor from
+   * one ordering names a position in a list the next ordering does not have.
+   * Leaving `pageIndex` alone would show page 3 of a two-page result as empty.
+   *
+   * Paging is the one change that keeps its index, so it goes through
+   * `goToPage` instead.
+   */
+  const applyFilters = useCallback(
+    (patch: Partial<QueueState>, replace = false) => {
+      setSearchParams(writeQueueState({ ...queue, ...patch, pageIndex: 0 }), {
+        replace,
+      });
+    },
+    [queue, setSearchParams],
+  );
+
+  const goToPage = useCallback(
+    (index: number) => {
+      setSearchParams(writeQueueState({ ...queue, pageIndex: index }));
+    },
+    [queue, setSearchParams],
+  );
+
+  // Base UI types the value as nullable — a Select can be cleared — but neither
+  // of these can be: both carry an explicit "all" item and no clear affordance.
+  const handleStatusChange = (value: TicketStatus | "all" | null) => {
+    applyFilters({ status: value ?? "all" });
+  };
+
+  const handleCategoryChange = (value: TicketCategory | "all" | null) => {
+    applyFilters({ category: value ?? "all" });
+  };
 
   /**
    * Two pieces of state for one box: what has been typed, and what has been
@@ -191,55 +284,60 @@ export function TicketListPage() {
    * They are separate because the input has to stay responsive per keystroke
    * while the query must not — one request per character would put eight
    * in flight for "refund", each with its own cursor, and the last to arrive
-   * wins regardless of which was asked last. `search` is what reaches the
-   * query key, and it only moves when typing pauses.
+   * wins regardless of which was asked last. `search` comes off the URL and
+   * only moves when typing pauses; it is what reaches the query key.
    */
-  const [searchInput, setSearchInput] = useState("");
-  const [search, setSearch] = useState("");
-
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      // Trimmed here as well as in the shared schema: this value is a query key,
-      // and "refund" and "refund " would otherwise be two cache entries holding
-      // identical results.
-      setSearch(searchInput.trim());
-      // A search narrows the queue, so the page the reader was on is gone with
-      // the rows that were on it — same reason the two filters reset.
-      setPageIndex(0);
-    }, 300);
-
-    return () => clearTimeout(timer);
-  }, [searchInput]);
+  const [searchInput, setSearchInput] = useState(search);
 
   /**
-   * Every control that changes the ordering or the set of rows also sends the
-   * reader back to page 1, because the page they were on does not survive it:
-   * page 3 of the open tickets is not page 3 of all of them, and a cursor from
-   * one ordering names a position in a list the next ordering does not have.
-   * Leaving `pageIndex` alone would show page 3 of a two-page result as empty.
+   * The URL is the source of truth for the term, so a Back or a restored link
+   * that changes `q` has to pull the box along with it — otherwise the debounce
+   * below reads the stale input as a fresh search and immediately undoes the
+   * navigation.
+   *
+   * Adjusted during render rather than in an effect, which is what React
+   * prescribes for state derived from something outside the component: an
+   * effect would paint the stale term first and correct it on a second pass,
+   * and it is the pattern `react-hooks/set-state-in-effect` exists to push you
+   * off. `syncedTerm` is the previous `search` — without it this cannot tell a
+   * navigation from its own debounce landing.
+   *
+   * The trimmed comparison is what keeps the debounce's own commit from
+   * rewriting the box: "refund " searches for "refund", and snatching the space
+   * back out from under someone still typing is a jarring way to say so.
    */
-  // Base UI types the value as nullable — a Select can be cleared — but neither
-  // of these can be: both carry an explicit "all" item and no clear affordance.
-  const handleStatusChange = (value: TicketStatus | "all" | null) => {
-    setStatus(value ?? "all");
-    setPageIndex(0);
-  };
+  const [syncedTerm, setSyncedTerm] = useState(search);
+  if (syncedTerm !== search) {
+    setSyncedTerm(search);
+    if (searchInput.trim() !== search) setSearchInput(search);
+  }
 
-  const handleCategoryChange = (value: TicketCategory | "all" | null) => {
-    setCategory(value ?? "all");
-    setPageIndex(0);
-  };
+  useEffect(() => {
+    // Trimmed here as well as in the shared schema: this value is a query key,
+    // and "refund" and "refund " would otherwise be two cache entries holding
+    // identical results.
+    const term = searchInput.trim();
+    if (term === search) return;
 
-  // `sorting` is an array TanStack replaces on every toggle, so it cannot go
-  // into a query key directly — a new array with identical contents would
-  // refetch the whole list on any unrelated re-render.
-  const sort = sorting[0];
-  const sortKey = (sort?.id ?? "createdAt") as TicketSortKey;
-  const sortOrder = sort?.desc === false ? "asc" : "desc";
+    // Replaces rather than pushes: six keystrokes must not become six history
+    // entries the Back button has to be clicked through. A search narrows the
+    // queue, so the page the reader was on is gone with the rows that were on
+    // it — `applyFilters` resets it for the same reason the two filters do.
+    const timer = setTimeout(() => applyFilters({ search: term }, true), 300);
+
+    return () => clearTimeout(timer);
+  }, [searchInput, search, applyFilters]);
+
+  // TanStack replaces this array on every toggle and would refetch the list on
+  // any unrelated re-render if it went into a query key; the URL's two scalars
+  // are what the query key holds, and this is derived back from them.
+  const sorting = useMemo<SortingState>(
+    () => [{ id: sortKey, desc: sortOrder === "desc" }],
+    [sortKey, sortOrder],
+  );
 
   const {
     data,
-    isPending,
     isError,
     error,
     hasNextPage,
@@ -282,10 +380,68 @@ export function TicketListPage() {
     [data, pageIndex],
   );
 
+  const pagesLoaded = data?.pages.length ?? 0;
+
   // `total` is the same on every page — it counts what matches the filters, not
   // what is on screen — so reading it off the first is not a shortcut.
   const total = data?.pages[0]?.total ?? 0;
   const pageCount = Math.ceil(total / TICKET_PAGE_SIZE);
+
+  /**
+   * A page index from the URL can name a page that is not in hand, and the
+   * cursor is the only thing that can say what to do about it.
+   *
+   * Cursor pagination cannot jump — page 3's cursor is only known once page 2
+   * has come back — so a cold arrival at `?page=3` walks forward one request at
+   * a time. That is the price of the address being restorable at all, and it is
+   * paid on a reload or a pasted link; a reader returning from a ticket finds
+   * those pages in the query cache and this does nothing.
+   *
+   * When the walk runs out of cursors the index is clamped to the last real
+   * page and the URL corrected in place, which covers `?page=99` and the case
+   * that happens by itself: a queue that shrank while the reader was away.
+   * Resolving a ticket from its detail page marks these pages stale, so the
+   * queue refetches on the way back — and a refetch stops at the first page
+   * whose `nextCursor` is null, so `data.pages` shrinks to what is really
+   * there and this lands the reader on the end of the queue rather than on an
+   * empty table reading "no tickets match that filter".
+   *
+   * `replace`, because a corrected address is not somewhere Back should return
+   * to. Clamping on `pageCount` instead would decide the same destination
+   * earlier without saving a single request — reaching the last page still
+   * means walking to it.
+   */
+  useEffect(() => {
+    if (!data || pageIndex < pagesLoaded) return;
+
+    if (hasNextPage) {
+      if (!isFetchingNextPage) void fetchNextPage();
+      return;
+    }
+
+    setSearchParams(
+      writeQueueState({ ...queue, pageIndex: Math.max(0, pagesLoaded - 1) }),
+      { replace: true },
+    );
+  }, [
+    data,
+    pageIndex,
+    pagesLoaded,
+    hasNextPage,
+    isFetchingNextPage,
+    fetchNextPage,
+    queue,
+    setSearchParams,
+  ]);
+
+  /**
+   * Covers the first load and the walk above alike: a page the cache has not
+   * reached yet has no rows, and rendering the empty-state card for it would
+   * tell the reader their filter matched nothing when the page is simply still
+   * on its way. Not while erroring — the alert is the honest answer there.
+   */
+  const isPageLoading = !isError && pageIndex >= pagesLoaded;
+
   const firstRow = pageIndex * TICKET_PAGE_SIZE + 1;
   const lastRow = Math.min(firstRow + tickets.length - 1, total);
 
@@ -294,17 +450,18 @@ export function TicketListPage() {
   // answer and `pageCount` is the count's; they agree, and trusting the cursor
   // here means Next is never offered for a page the server cannot produce.
   const isLastPage = pageIndex >= pageCount - 1;
-  const canGoNext =
-    !isLastPage && (pageIndex + 1 < (data?.pages.length ?? 0) || hasNextPage);
+  const canGoNext = !isLastPage && (pageIndex + 1 < pagesLoaded || hasNextPage);
 
   const goNext = () => {
     if (!canGoNext) return;
     // Already fetched — Prev then Next costs nothing.
-    if (pageIndex + 1 < (data?.pages.length ?? 0)) {
-      setPageIndex(pageIndex + 1);
+    if (pageIndex + 1 < pagesLoaded) {
+      goToPage(pageIndex + 1);
       return;
     }
-    void fetchNextPage().then(() => setPageIndex((index) => index + 1));
+    // Fetched before the index moves, so the page in hand stays on screen under
+    // a "Loading…" button rather than blinking through the skeleton.
+    void fetchNextPage().then(() => goToPage(pageIndex + 1));
   };
 
   const table = useTable({
@@ -315,8 +472,13 @@ export function TicketListPage() {
     // Not `setSorting` directly: a new ordering makes the current page index
     // meaningless, and TanStack hands the updater straight through.
     onSortingChange: (updater) => {
-      setSorting(updater);
-      setPageIndex(0);
+      const next = typeof updater === "function" ? updater(sorting) : updater;
+      const first = next[0];
+      applyFilters({
+        sortKey:
+          (first?.id as TicketSortKey | undefined) ?? DEFAULT_QUEUE.sortKey,
+        sortOrder: first?.desc === false ? "asc" : "desc",
+      });
     },
     // States the intent, and is the belt to the omitted sortedRowModel's
     // braces: on its own it changes nothing here, because there is no sorted
@@ -416,7 +578,7 @@ export function TicketListPage() {
         </Select>
       </div>
 
-      {isPending && <TicketsTableSkeleton table={table} />}
+      {isPageLoading && <TicketsTableSkeleton table={table} />}
 
       {isError && (
         <Alert variant="destructive">
@@ -425,7 +587,7 @@ export function TicketListPage() {
         </Alert>
       )}
 
-      {data && tickets.length === 0 && (
+      {data && !isPageLoading && tickets.length === 0 && (
         <Card className="border-dashed">
           <CardContent className="py-10 text-center">
             {/*
@@ -491,7 +653,7 @@ export function TicketListPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setPageIndex((index) => Math.max(0, index - 1))}
+                onClick={() => goToPage(Math.max(0, pageIndex - 1))}
                 disabled={pageIndex === 0}
               >
                 ‹ Prev
@@ -518,6 +680,32 @@ export function TicketListPage() {
 }
 
 type TicketTable = ReactTable<typeof features, TicketSummary>;
+
+/**
+ * The subject is the row's handle: it is what a reader recognises the ticket
+ * by, so it is what opens it. A whole-row click would take the sender address
+ * and the status badge with it and leave no way to select text in the row; an
+ * anchor keeps middle-click, cmd-click and "copy link" working, which is how a
+ * ticket gets handed to someone else.
+ *
+ * `state` carries the queue's own address across, and that is what the detail
+ * page's "Back to tickets" returns to. The browser's Back button gets the same
+ * thing from the URL for free; the in-page link is a fresh navigation to "/"
+ * and would otherwise drop the reader on page 1 of an unfiltered queue.
+ */
+function SubjectCell({ ticket }: { ticket: TicketSummary }) {
+  const location = useLocation();
+
+  return (
+    <Link
+      to={`/tickets/${ticket.id}`}
+      state={{ from: `${location.pathname}${location.search}` }}
+      className="rounded-sm font-medium underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
+    >
+      {ticket.subject}
+    </Link>
+  );
+}
 
 /**
  * The From header, as one cell.

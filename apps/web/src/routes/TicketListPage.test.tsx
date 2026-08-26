@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useLocation } from "react-router";
 import type { ListTicketsResponse, TicketSummary } from "@helpdesk/shared";
 import { renderWithQuery } from "../test/render-with-query.tsx";
 import { TicketListPage } from "./TicketListPage.tsx";
@@ -99,15 +99,45 @@ function pageOf(
 }
 
 /**
- * The subject cell is a `<Link>`, and `<Link>` throws outside a router — so
- * every render here needs one. No routes are declared: nothing in this file
- * navigates, and the destination is proven by asserting the href rather than
- * by rendering the page it points at.
+ * The router is not only there to keep `<Link>` from throwing: the queue's
+ * filters, sort and page all live in the query string, so it is the state
+ * container the component reads from. This probe is how a test reads back what
+ * the controls wrote there, and `initialEntry` is how one arrives at a queue
+ * somebody had already narrowed — a reload, a pasted link, or the Back button
+ * after a ticket was opened.
+ *
+ * Still no routes: nothing here navigates to another page, and a destination is
+ * proven by asserting the href rather than by rendering what it points at.
  */
-const renderList = () =>
+function LocationProbe() {
+  const location = useLocation();
+
+  // Rendered rather than assigned to a module variable: writing to one during
+  // render is a side effect, and a probe that breaks the rules of React is a
+  // poor witness to a component that keeps them.
+  return (
+    <>
+      <span data-testid="queue-url">
+        {`${location.pathname}${location.search}`}
+      </span>
+      <span data-testid="queue-state">{JSON.stringify(location.state)}</span>
+    </>
+  );
+}
+
+const queueUrl = () => screen.getByTestId("queue-url").textContent;
+
+/** What the last navigation carried in history state, or null for none. */
+const queueState = () =>
+  JSON.parse(
+    screen.getByTestId("queue-state").textContent || "null",
+  ) as unknown;
+
+const renderList = (initialEntry = "/") =>
   renderWithQuery(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <TicketListPage />
+      <LocationProbe />
     </MemoryRouter>,
   );
 
@@ -765,5 +795,171 @@ describe("TicketListPage search", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/**
+ * The queue's state is in the URL, and this is why.
+ *
+ * Opening a ticket unmounts this component. Anything held in `useState` dies
+ * with it, so before this the reader came back from a ticket on page 1 of an
+ * unfiltered queue no matter where they had been standing — the single most
+ * common thing anyone does while working a queue, undone every time.
+ */
+describe("TicketListPage state in the URL", () => {
+  const tenRows = (offset: number) =>
+    Array.from({ length: 10 }, (_, i) =>
+      ticketRow({
+        id: `${offset + i}`.padStart(8, "0") + "-1111-4111-8111-111111111111",
+        subject: `Ticket number ${offset + i}`,
+      }),
+    );
+
+  it("leaves an untouched queue at a bare /", async () => {
+    responders.push(jsonResponse(pageOf([ticketRow()])));
+
+    renderList();
+    await screen.findByText("Cannot log in to the course portal");
+
+    // Defaults are omitted rather than spelled out, so the address only ever
+    // names what the reader actually changed.
+    expect(queueUrl()).toBe("/");
+  });
+
+  it("puts the page number in the address", async () => {
+    responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 100)));
+    renderList();
+    await screen.findByText("Ticket number 1");
+
+    responders.push(jsonResponse(pageOf(tenRows(11), "cursor-3", 100)));
+    await userEvent.click(screen.getByRole("button", { name: /Next/ }));
+    await screen.findByText("Ticket number 11");
+
+    // One-based in the URL: ?page=1 is the first page, not the second.
+    expect(queueUrl()).toBe("/?page=2");
+  });
+
+  it("puts the filters and the sort there too", async () => {
+    responders.push(jsonResponse(pageOf([ticketRow(), REFUND])));
+    renderList();
+    await screen.findByText("Cannot log in to the course portal");
+
+    responders.push(jsonResponse(pageOf([REFUND])));
+    await userEvent.click(screen.getByRole("combobox", { name: /status/i }));
+    await userEvent.click(
+      await screen.findByRole("option", { name: "resolved" }),
+    );
+    await waitFor(() => expect(queueUrl()).toBe("/?status=resolved"));
+
+    responders.push(jsonResponse(pageOf([REFUND])));
+    await userEvent.click(screen.getByRole("button", { name: /Subject/ }));
+
+    await waitFor(() =>
+      expect(queueUrl()).toBe("/?status=resolved&sort=subject&order=asc"),
+    );
+  });
+
+  it("starts on the page the URL names, walking the cursor to reach it", async () => {
+    responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 100)));
+    responders.push(jsonResponse(pageOf(tenRows(11), "cursor-3", 100)));
+    responders.push(jsonResponse(pageOf(tenRows(21), "cursor-4", 100)));
+
+    renderList("/?page=3");
+
+    expect(await screen.findByText("Ticket number 21")).toBeDefined();
+    expect(screen.getByText("Page 3 of 10")).toBeDefined();
+    // Cursor pagination cannot jump — page 3's cursor is only known once page 2
+    // has come back — so a cold arrival walks forward one request at a time.
+    expect(requestedUrls).toEqual([
+      "/api/tickets",
+      "/api/tickets?cursor=cursor-2",
+      "/api/tickets?cursor=cursor-3",
+    ]);
+  });
+
+  it("starts filtered and sorted when the URL says so", async () => {
+    responders.push(jsonResponse(pageOf([REFUND])));
+
+    renderList("/?status=resolved&q=cohort&sort=subject&order=asc");
+
+    await screen.findByText("Refund for the January cohort");
+    expect(requestedUrls[0]).toBe(
+      "/api/tickets?status=resolved&q=cohort&sort=subject&order=asc",
+    );
+    // The box shows the term it is searching for, or clearing it is guesswork.
+    expect(
+      (screen.getByRole("searchbox", { name: /search/i }) as HTMLInputElement)
+        .value,
+    ).toBe("cohort");
+  });
+
+  it("ignores a filter the domain does not have", async () => {
+    responders.push(jsonResponse(pageOf([ticketRow()])));
+
+    // A stale or hand-edited link should show the queue rather than an error,
+    // and the request is built from the parsed value — so `pending`, which is
+    // not a status, cannot reach the API at all.
+    renderList("/?status=pending");
+
+    await screen.findByText("Cannot log in to the course portal");
+    expect(requestedUrls[0]).toBe("/api/tickets");
+  });
+
+  it("clamps a page past the end of the queue", async () => {
+    responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 20)));
+    responders.push(jsonResponse(pageOf(tenRows(11), null, 20)));
+
+    renderList("/?page=9");
+
+    // Walks until the cursors run out, then lands on the last real page and
+    // corrects the address — an empty table would read as "no tickets".
+    expect(await screen.findByText("Ticket number 11")).toBeDefined();
+    expect(screen.getByText("Page 2 of 2")).toBeDefined();
+    await waitFor(() => expect(queueUrl()).toBe("/?page=2"));
+  });
+
+  /**
+   * The other half of returning from a ticket: resolving one while the status
+   * filter reads "open" takes it out of the queue, and the detail page marks
+   * those pages stale for exactly that reason. If the row was the last on the
+   * last page, the page the reader left no longer exists.
+   */
+  it("clamps when the queue shrinks under the reader", async () => {
+    responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 20)));
+    responders.push(jsonResponse(pageOf(tenRows(11), null, 20)));
+
+    const { queryClient } = renderList("/?status=open&page=2");
+    await screen.findByText("Ticket number 11");
+
+    // What the detail page's mutation does, and what returning to the queue
+    // then acts on: one page's worth of tickets is left.
+    responders.push(jsonResponse(pageOf(tenRows(1).slice(0, 5), null, 5)));
+    await queryClient.invalidateQueries({ queryKey: ["tickets"] });
+
+    // `total` is counted with the same filters as the page, so it is the
+    // authority on how many pages there are — an empty table reading "no
+    // tickets match that filter" would blame the filter for a page that is
+    // simply gone.
+    await waitFor(() => expect(queueUrl()).toBe("/?status=open"));
+    expect(screen.getByText("Page 1 of 1")).toBeDefined();
+    expect(screen.getByText("Ticket number 1")).toBeDefined();
+    expect(screen.queryByText(/No tickets match/)).toBeNull();
+  });
+
+  it("hands the queue's own address to each ticket link", async () => {
+    responders.push(jsonResponse(pageOf(tenRows(1), "cursor-2", 20)));
+    responders.push(jsonResponse(pageOf(tenRows(11), null, 20)));
+
+    renderList("/?status=open&page=2");
+    await screen.findByText("Ticket number 11");
+
+    // The browser's Back button gets the queue back from the URL for free. The
+    // detail page's own "Back to tickets" is a fresh navigation to "/", so the
+    // link that opens a ticket carries the address it left in history state —
+    // page and filter included, which is the whole point.
+    await userEvent.click(
+      screen.getByRole("link", { name: "Ticket number 11" }),
+    );
+    expect(queueState()).toEqual({ from: "/?status=open&page=2" });
   });
 });

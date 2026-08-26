@@ -97,7 +97,10 @@ try {
     console.log(`  id: ${created.user.id}`);
   }
 } catch (error) {
-  console.error("Seeding failed:", error instanceof Error ? error.message : error);
+  console.error(
+    "Seeding failed:",
+    error instanceof Error ? error.message : error,
+  );
   process.exitCode = 1;
 } finally {
   await closeDb();

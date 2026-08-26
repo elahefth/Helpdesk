@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "react-router";
+import { Link, useLocation, useParams } from "react-router";
 import {
   canTransition,
   CATEGORY_LABELS,
@@ -122,9 +122,20 @@ export function TicketDetailPage() {
  * is most likely to want to leave from.
  */
 function BackToQueue() {
+  const location = useLocation();
+
+  // The queue's own address, handed over by the link that opened this ticket.
+  // Its filters, sort and page are all in that query string, so returning to it
+  // returns to the row the reader clicked rather than to page 1 of everything.
+  // A ticket reached by a pasted link or a reload carries no state and falls
+  // back to the bare queue — and the shape is checked rather than trusted,
+  // because history state survives a reload and is not ours to assume about.
+  const from = (location.state as { from?: unknown } | null)?.from;
+  const to = typeof from === "string" && from.startsWith("/") ? from : "/";
+
   return (
     <Link
-      to="/"
+      to={to}
       className="inline-flex items-center gap-1.5 rounded-sm text-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
     >
       <ArrowLeft aria-hidden="true" className="size-4" />
@@ -231,11 +242,30 @@ function TicketControls({ ticket }: { ticket: TicketDetail }) {
 
   const { mutate, isPending, isError, error } = useMutation({
     mutationFn: (body: UpdateTicketBody) => updateTicket(ticket.id, body),
-    // The PATCH answers with the whole updated ticket, so the cache is written
-    // rather than invalidated: an invalidate would re-fetch what the response
-    // already carried, and show a loading page in between.
-    onSuccess: (updated) =>
-      queryClient.setQueryData(["ticket", ticket.id], updated),
+    onSuccess: (updated) => {
+      // The PATCH answers with the whole updated ticket, so *this* page's cache
+      // is written rather than invalidated: an invalidate would re-fetch what
+      // the response already carried, and show a loading page in between.
+      queryClient.setQueryData(["ticket", ticket.id], updated);
+
+      // The queue is a different cache entry and this row is in it, wearing the
+      // status the reader just changed. Without this, going back shows the old
+      // one — the pages walked are still cached, and `staleTime` keeps them for
+      // half a minute.
+      //
+      // Invalidated rather than patched in place, and the difference is not
+      // cosmetic: resolving a ticket while the status filter reads "open" takes
+      // it out of the queue entirely, and changing the column the queue is
+      // sorted by moves it to a different page. Only the server knows what
+      // takes its place, and `total` — the page counter's divisor — moves with
+      // it. The key is the prefix, so every filter and sort combination the
+      // reader has visited goes stale together.
+      //
+      // Nothing refetches now: the queue is unmounted, so its queries are
+      // inactive and are simply marked stale, then re-fetched when they next
+      // render — which is the moment the reader arrives back on them.
+      void queryClient.invalidateQueries({ queryKey: ["tickets"] });
+    },
   });
 
   const staff = assignees?.data ?? [];

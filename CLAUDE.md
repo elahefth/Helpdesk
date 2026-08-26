@@ -152,15 +152,39 @@ Staff-only console: students never log in. Sessions live in the `session` table 
   - **`sender` sorts on `coalesce(student_name, student_email)`** — the same fallback the cell renders, so the column sorts the way it reads. Sorting the raw `student_name` would gather every nameless sender into one block.
   - **A nullable sort column (`category`, the only one) leads its ORDER BY with `IS NULL`**, so unclassified is the tail in *both* directions rather than flipping to the head on desc, and its keyset predicate carries an explicit `IS NULL` branch. The plain row-value tuple is wrong twice over there and both are silent: a NULL makes the comparison NULL rather than false, so the tail is unreachable and page two just ends early; and once the cursor is *inside* the tail there is no value left to compare.
   - **`ticket` timestamps are `precision: 3`.** Postgres defaults to microseconds and a JS `Date` holds milliseconds, so without it the driver truncates on read and a cursor lands a hair below the row it names — invisible descending, an infinite one-row loop ascending. `routes/ticket-sort.test.ts` pins both the column type and the round-trip.
-- **The seeded corpus is 100 committed fixtures, delivered over HTTP.** `dev/ticket-fixtures.ts` holds them and `dev/seed-tickets.ts` posts each one to `POST /api/inbound-email` with a deterministic Message-ID, so a rerun is idempotent by the same unique index a retrying provider hits. It then writes `created_at`, `updated_at` and `status` **directly**, which is the one place anything reaches around the API: ingestion stamps `created_at` with the row default and every ticket is born `open`, and `PATCH /api/tickets/:id` still only takes an `assigneeId` — without the fix-up all hundred tickets would have been created this afternoon and none would ever have been resolved, which makes the date sort and the status filter impossible to check by eye. Move the status half into `PATCH /api/tickets/:id` when that route learns `status`; the assignment work left it one field away.
+- **The seeded corpus is 100 committed fixtures, delivered over HTTP.** `dev/ticket-fixtures.ts` holds them and `dev/seed-tickets.ts` posts each one to `POST /api/inbound-email` with a deterministic Message-ID, so a rerun is idempotent by the same unique index a retrying provider hits. It then writes `created_at`, `updated_at` and `status` **directly**, which is the one place anything reaches around the API: ingestion stamps `created_at` with the row default and every ticket is born `open`, and the corpus predates `PATCH /api/tickets/:id` — without the fix-up all hundred tickets would have been created this afternoon and none would ever have been resolved, which makes the date sort and the status filter impossible to check by eye. That route now takes `status`, so the status half *could* move — but it would be 100 extra HTTP round trips and the timestamps would still need the direct write, so the one statement stays. It does mean the seeded statuses bypass `canTransition`, which is deliberate: the corpus needs closed tickets that were never walked through a lifecycle.
 - **The corpus's spread is load-bearing, and `dev/ticket-fixtures.test.ts` pins it.** Subjects start across the whole alphabet, senders repeat and nine carry no display name, ~18% are unclassified, statuses skew with age, and `daysAgo` is irregular with a few same-day collisions. Each of those exists because a corpus that is uniform in one column makes that column's sort look broken rather than look sorted — the same-day rows, for instance, are the only thing that exercises the cursor's id tiebreaker from the UI.
 - **`apps/api/src/dev/send-inbound-email.ts` is the only source there is.** It posts the same normalised payload a real adapter would, to the same endpoint, so it exercises the real path rather than a test double — which is why there is no `EmailSource` interface yet: it would describe an integration nobody has written.
 
-### Assignment — a ticket gets an owner
+### Ticket updates — status, category, assignee
 
 `PATCH /api/tickets/:id` and `GET /api/assignees` are the whole of it, and the
 SPA reaches them from the ticket detail page only. The queue is deliberately
-untouched: no assignee column, no sort key, no filter.
+untouched: no assignee column, no sort key, no filter — you change a ticket by
+opening it.
+
+- **One route, three optional fields, and a body naming none of them is a read
+  rather than an error.** That is what keeps this one endpoint instead of three,
+  and why it was never `PATCH /api/tickets/:id/assignee`. The SPA sends only the
+  field the reader changed — a PATCH that restated all three would overwrite
+  whatever a colleague changed while the page sat open.
+- **The status move is checked against `TICKET_STATUS_TRANSITIONS`**, which had
+  been declared in `packages/shared/src/domain.ts` and enforced nowhere until
+  this route landed. Two things about it are easy to get wrong. `canTransition`
+  answers false for the *identity* move, which is a true statement about the
+  lifecycle and a wrong answer to `PATCH {status: "open"}` on an open ticket —
+  so "no change" is filtered out before the check and only a real move reaches
+  it. And the refusal is a **409, not a 400**: "closed" is a status, the payload
+  is fine, and this ticket simply cannot become it, which is the line
+  `HttpError.conflict` draws.
+- **`closed` is terminal**, so the SPA disables the whole Status select and says
+  why. That condition is read off `TICKET_STATUS_TRANSITIONS[status].length` and
+  not spelled `=== "closed"` — a literal would keep claiming it after someone
+  gave closed a way out. The per-option `disabled` beside it fires for nothing
+  under today's table and is the general rule stated once.
+- **An empty change set skips the UPDATE entirely.** Not an optimisation:
+  `updatedAt` is `$onUpdate`, so a write that set nothing would still restamp it
+  and move the ticket to the top of the queue's default sort.
 
 - **`ticket.assigned_to_id` is nullable and references `user.id`.** Null is the
   unassigned pool every ticket arrives in — nothing routes, so an owner is
@@ -221,9 +245,15 @@ The queue lives at the index route, `/`, and the nav links to it with `end` — 
 
 The queue shows **one page of 10 at a time**, with Prev/Next and a "Page 3 of 10" counter — not the accumulating "Load more" it started as. `TICKET_PAGE_SIZE` in `packages/shared` is the single source of both the API's default `limit` and the divisor the SPA turns `total` into a page count with; two matching numbers would drift into a page count that is quietly wrong.
 
-The search box holds **two pieces of state for one input** — `searchInput` (per keystroke) and `search` (debounced 300ms, and the only one in the query key). Without the split, "refund" is six requests with six cursors and the last to *arrive* wins rather than the last asked for. The debounce also resets `pageIndex`, like every other control that changes the row set.
+**The queue's whole state lives in the URL** — `?status=`, `?category=`, `?q=`, `?sort=`/`?order=` and `?page=` (one-based), read back through the shared Zod schemas by `readQueueState` and written by `writeQueueState`, which omits anything still at its default so an untouched queue stays a bare `/`. It is there because opening a ticket *unmounts* `TicketListPage`: state in `useState` dies with it, so returning from a ticket used to land on page 1 of an unfiltered queue. In the query string it survives the round trip and a reload, the browser's Back button restores it for free, and a position in the queue becomes something an agent can paste. An unrecognised value falls back to the default rather than erroring, and every request is built from the *parsed* value, so `?status=pending` cannot reach the API.
 
-It is still `useInfiniteQuery` underneath, and the accumulation is still what makes it work: every page walked stays in `data.pages`, so **Prev is an index change rather than a request**, and only a first visit to a page touches the network. What changed is that the component renders `data.pages[pageIndex]` instead of flattening them all. Anything that changes the ordering or the row set — both filters, and the sort — must also reset `pageIndex` to 0: page 3 of the open tickets is not page 3 of all of them, and a cursor from one ordering names a position the next ordering does not have.
+Three consequences. A page index restored from the URL may name a page nothing has fetched — cursor pagination cannot jump, so an effect **walks `fetchNextPage` forward one request at a time**, and clamps (with `replace`) when the cursors run out, so `?page=99` shows the end of the queue rather than an empty table. Clamping on `pageCount` instead would pick the same destination earlier and save no request, since reaching the last page still means walking to it. The detail page's own "Back to tickets" is a fresh navigation to `/`, so the subject link carries the queue's address in `state.from` and `BackToQueue` reads it back (validated as a path, since history state survives a reload).
+
+And the queue is **a different cache entry from the ticket**, so `PATCH /api/tickets/:id` succeeding writes `["ticket", id]` *and* invalidates `["tickets"]` by prefix. Without the second half, going back showed the old status: the walked pages are still cached and `staleTime` holds them for 30s. Invalidated rather than patched in place, because the change can move the row out of the queue entirely (resolve one under `?status=open`) or to another page (under `?sort=status`), and `total` — the page counter's divisor — moves with it. Nothing refetches at mutation time, since the queue is unmounted and its queries inactive; they go stale and refetch when the reader lands back on them. That refetch stops at the first page whose `nextCursor` is null, which is what makes `data.pages` shrink to what is really there and lets the clamp above catch a reader stranded past the new end.
+
+The search box still holds **two pieces of state for one input** — `searchInput` (per keystroke) and `search`, now the URL's `q`, committed on a 300ms debounce and the only one in the query key. Without the split, "refund" is six requests with six cursors and the last to *arrive* wins rather than the last asked for. It commits with `replace: true` so six keystrokes are not six history entries, and it resets `pageIndex` like every other control that changes the row set. The reverse sync — a Back that changes `q` pulling the box along — is a **render-phase adjustment against a `syncedTerm` state**, not an effect: `react-hooks/set-state-in-effect` is an error in this repo, and the comparison is trimmed so the debounce's own commit does not snatch back a trailing space someone is still typing.
+
+It is still `useInfiniteQuery` underneath, and the accumulation is still what makes it work: every page walked stays in `data.pages`, so **Prev is an index change rather than a request**, and only a first visit to a page touches the network. What changed is that the component renders `data.pages[pageIndex]` instead of flattening them all. Anything that changes the ordering or the row set — both filters, the search and the sort — goes through `applyFilters`, which resets `pageIndex` to 0: page 3 of the open tickets is not page 3 of all of them, and a cursor from one ordering names a position the next ordering does not have. Paging is the one change that keeps its index, and goes through `goToPage` instead.
 
 v9 is not v8 with a new version number, and three of its differences bit during that port:
 

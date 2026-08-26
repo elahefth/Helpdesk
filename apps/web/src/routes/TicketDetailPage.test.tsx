@@ -3,6 +3,7 @@ import { cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router";
 import type { ListAssigneesResponse, TicketDetail } from "@helpdesk/shared";
+import type { QueryClient } from "@tanstack/react-query";
 import { renderWithQuery } from "../test/render-with-query.tsx";
 import { TicketDetailPage } from "./TicketDetailPage.tsx";
 
@@ -140,15 +141,29 @@ function serve(detail: TicketDetail, staff: ListAssigneesResponse = STAFF) {
  * because the id comes from `useParams` — the whole point of the page having an
  * address. A prop would test a component this app never renders.
  */
-function renderDetail(id: string = TICKET_ID) {
+function renderDetail(id: string = TICKET_ID, from?: string) {
   return renderWithQuery(
-    <MemoryRouter initialEntries={[`/tickets/${id}`]}>
+    // `state` is what the queue's own link attaches when it opens a ticket:
+    // the address the reader is coming from, page and filters included. Absent
+    // here means the ticket was reached some other way — a pasted link, a
+    // reload — which is the fallback case.
+    <MemoryRouter
+      initialEntries={[
+        from
+          ? { pathname: `/tickets/${id}`, state: { from } }
+          : { pathname: `/tickets/${id}` },
+      ]}
+    >
       <Routes>
         <Route path="/tickets/:id" element={<TicketDetailPage />} />
       </Routes>
     </MemoryRouter>,
   );
 }
+
+/** The "Back to tickets" link's destination. */
+const backHref = () =>
+  screen.getByRole("link", { name: /Back to tickets/ }).getAttribute("href");
 
 /** Opens one of the sidebar selects and picks the option with this label. */
 async function choose(control: RegExp, label: string | RegExp) {
@@ -307,11 +322,43 @@ describe("TicketDetailPage", () => {
     renderDetail();
     await screen.findByText("No such ticket");
 
-    expect(
-      screen
-        .getByRole("link", { name: /Back to tickets/ })
-        .getAttribute("href"),
-    ).toBe("/");
+    expect(backHref()).toBe("/");
+  });
+
+  /**
+   * The queue unmounts when a ticket is opened, so the page, filter and sort a
+   * reader had set are gone unless something carries them. The URL does that
+   * for the browser's Back button; this link is a fresh navigation and needs
+   * handing the address explicitly, or it lands on page 1 of everything.
+   */
+  it("returns to the queue page the reader came from", async () => {
+    serve(ticket());
+
+    renderDetail(TICKET_ID, "/?status=open&page=3");
+    await screen.findByRole("heading", { name: /Cannot log in/ });
+
+    expect(backHref()).toBe("/?status=open&page=3");
+  });
+
+  it("falls back to the queue when the ticket was reached by a bare link", async () => {
+    serve(ticket());
+
+    renderDetail();
+    await screen.findByRole("heading", { name: /Cannot log in/ });
+
+    expect(backHref()).toBe("/");
+  });
+
+  // History state survives a reload and is not this page's to trust: anything
+  // that is not a path of our own gets the plain queue rather than being
+  // handed to the router as a destination.
+  it("ignores a destination that is not a path in this app", async () => {
+    serve(ticket());
+
+    renderDetail(TICKET_ID, "https://example.com/phish");
+    await screen.findByRole("heading", { name: /Cannot log in/ });
+
+    expect(backHref()).toBe("/");
   });
 
   it("labels each header line", async () => {
@@ -338,6 +385,103 @@ describe("TicketDetailPage", () => {
 
     expect(screen.getByText("Message")).toBeDefined();
     expect(screen.getByText("From Ada Student")).toBeDefined();
+  });
+
+  /**
+   * The queue and this page are two cache entries, and a change made here shows
+   * in both. Nothing refetches while this page is open — the queue is unmounted
+   * and its queries are inactive — so the row is marked stale instead, and
+   * re-fetched the moment the reader lands back on it.
+   */
+  describe("the queue's cache", () => {
+    /** A page of the queue, cached the way TicketListPage leaves it behind. */
+    const cacheQueue = (queryClient: QueryClient, key: unknown = {}) =>
+      queryClient.setQueryData(["tickets", key], {
+        pages: [{ data: [], nextCursor: null, total: 1 }],
+        pageParams: [undefined],
+      });
+
+    const isStale = (queryClient: QueryClient, key: unknown = {}) =>
+      queryClient.getQueryState(["tickets", key])?.isInvalidated;
+
+    it("goes stale when a status changes, so Back does not show the old one", async () => {
+      serve(ticket());
+      handlers[`PATCH ${TICKET_PATH}`] = jsonResponse(
+        ticket({ status: "resolved" }),
+      );
+
+      const { queryClient } = renderDetail();
+      await screen.findByRole("heading", { name: /Cannot log in/ });
+      cacheQueue(queryClient);
+
+      await choose(STATUS, "Resolved");
+
+      await waitFor(() => expect(isStale(queryClient)).toBe(true));
+    });
+
+    it("goes stale when a category changes too", async () => {
+      serve(ticket());
+      handlers[`PATCH ${TICKET_PATH}`] = jsonResponse(
+        ticket({ category: "refund_request" }),
+      );
+
+      const { queryClient } = renderDetail();
+      await screen.findByRole("heading", { name: /Cannot log in/ });
+      cacheQueue(queryClient);
+
+      await choose(CATEGORY, "Refund Request");
+
+      await waitFor(() => expect(isStale(queryClient)).toBe(true));
+    });
+
+    /**
+     * Every filter and sort the reader has visited is its own cache entry, and
+     * a resolved ticket is wrong in all of them — gone from `status=open`,
+     * moved under `sort=status`. Matching on the key's prefix is what covers
+     * them without naming any.
+     */
+    it("goes stale under every filter and sort, not just the one on screen", async () => {
+      serve(ticket());
+      handlers[`PATCH ${TICKET_PATH}`] = jsonResponse(
+        ticket({ status: "resolved" }),
+      );
+
+      const { queryClient } = renderDetail();
+      await screen.findByRole("heading", { name: /Cannot log in/ });
+      const openQueue = { status: "open", sortKey: "createdAt" };
+      const sorted = { status: "all", sortKey: "status" };
+      cacheQueue(queryClient, openQueue);
+      cacheQueue(queryClient, sorted);
+
+      await choose(STATUS, "Resolved");
+
+      await waitFor(() => expect(isStale(queryClient, openQueue)).toBe(true));
+      expect(isStale(queryClient, sorted)).toBe(true);
+    });
+
+    it("leaves this page's own ticket alone", async () => {
+      serve(ticket());
+      handlers[`PATCH ${TICKET_PATH}`] = jsonResponse(
+        ticket({ status: "resolved" }),
+      );
+
+      const { queryClient } = renderDetail();
+      await screen.findByRole("heading", { name: /Cannot log in/ });
+
+      await choose(STATUS, "Resolved");
+      await waitFor(() => expect(shown(STATUS)).toContain("Resolved"));
+
+      // The PATCH answered with the whole updated ticket, so this cache is
+      // written rather than invalidated: invalidating would re-fetch what the
+      // response already carried and blink a skeleton over the page the reader
+      // is looking at.
+      expect(
+        queryClient.getQueryState(["ticket", TICKET_ID])?.isInvalidated,
+      ).toBe(false);
+      expect(requests.filter((r) => r === `GET ${TICKET_PATH}`)).toHaveLength(
+        1,
+      );
+    });
   });
 
   describe("status", () => {
