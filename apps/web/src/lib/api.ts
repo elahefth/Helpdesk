@@ -1,17 +1,22 @@
 import {
   apiErrorSchema,
+  createTicketReplyResponseSchema,
   createUserResponseSchema,
   deleteUserResponseSchema,
   listAssigneesResponseSchema,
+  listTicketRepliesResponseSchema,
   listTicketsResponseSchema,
   listUsersResponseSchema,
   readinessSchema,
   ticketDetailSchema,
   updateUserResponseSchema,
+  type CreateTicketReplyBody,
+  type CreateTicketReplyResponse,
   type CreateUserBody,
   type CreateUserResponse,
   type DeleteUserResponse,
   type ListAssigneesResponse,
+  type ListTicketRepliesResponse,
   type ListTicketsQuery,
   type ListTicketsResponse,
   type ListUsersQuery,
@@ -128,6 +133,45 @@ export function updateTicket(
     method: "PATCH",
     body: JSON.stringify(body),
   });
+}
+
+/**
+ * One ticket's reply thread, oldest first.
+ *
+ * A separate request from `getTicket`, which is what keeps the two independent
+ * in the cache: writing a reply must not refetch the ticket, and changing a
+ * status must not refetch the thread. It is unpaginated by design — a
+ * conversation with a "load more" in the middle is one the reader reassembles —
+ * so there is no query parameter.
+ */
+export function listTicketReplies(
+  id: string,
+): Promise<ListTicketRepliesResponse> {
+  return request(
+    `/api/tickets/${encodeURIComponent(id)}/replies`,
+    listTicketRepliesResponseSchema,
+  );
+}
+
+/**
+ * Write a reply. Open to any signed-in staff member, like `updateTicket`.
+ *
+ * The author is not in the body and cannot be: the API takes it from the
+ * session, so a reply is always signed by whoever is actually typing.
+ *
+ * Nothing is delivered anywhere — there is no email provider in this repo yet —
+ * so this records what was said. The page says so beneath the form rather than
+ * letting an agent believe a student has been written to.
+ */
+export function createTicketReply(
+  id: string,
+  body: CreateTicketReplyBody,
+): Promise<CreateTicketReplyResponse> {
+  return request(
+    `/api/tickets/${encodeURIComponent(id)}/replies`,
+    createTicketReplyResponseSchema,
+    { method: "POST", body: JSON.stringify(body) },
+  );
 }
 
 /**

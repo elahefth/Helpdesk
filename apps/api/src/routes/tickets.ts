@@ -1,18 +1,26 @@
 import { Router } from "express";
-import { and, count, eq, ilike, isNull, or, type SQL } from "drizzle-orm";
+import { and, asc, count, eq, ilike, isNull, or, type SQL } from "drizzle-orm";
 import {
   canTransition,
+  createTicketReplyBodySchema,
   listTicketsQuerySchema,
   ticketSummarySchema,
   updateTicketBodySchema,
+  type CreateTicketReplyResponse,
+  type ListTicketRepliesResponse,
   type ListTicketsResponse,
   type TicketDetail,
   type UpdateTicketResponse,
 } from "@helpdesk/shared";
 import type { Database } from "../db/client.ts";
-import { ticket, user } from "../db/schema.ts";
+import { ticket, ticketReply, user } from "../db/schema.ts";
 import { HttpError } from "../middleware/errors.ts";
-import { toTicketDetail, toTicketSummary } from "./ticket-mappers.ts";
+import {
+  toTicketDetail,
+  toTicketReply,
+  toTicketSummary,
+  toUser,
+} from "./ticket-mappers.ts";
 import {
   decodeTicketCursor,
   encodeTicketCursor,
@@ -289,6 +297,132 @@ export function createTicketsRouter(db: Database | undefined): Router {
 
     const body: UpdateTicketResponse = detail;
     res.json(body);
+  });
+
+  /**
+   * A ticket's reply thread, oldest first.
+   *
+   * `innerJoin`, unlike `findTicketDetail`'s left join to the assignee, and the
+   * difference is the column: `author_id` is NOT NULL, so an inner join loses
+   * nothing and is what types the author non-nullable all the way out to the
+   * response. It deliberately does not filter `user.deletedAt` for the same
+   * reason the assignee join does not — a departed colleague keeps their
+   * byline, because the alternative is a thread that quietly loses track of who
+   * said what.
+   *
+   * Unpaginated. A thread is read as a conversation, and a "load more" in the
+   * middle of one is something the reader has to reassemble; a ticket with
+   * enough replies to need a cursor is a different problem than pagination.
+   */
+  router.get("/tickets/:id/replies", async (req, res) => {
+    const id = ticketSummarySchema.shape.id.safeParse(req.params.id);
+    if (!id.success) throw HttpError.badRequest("Malformed ticket id");
+
+    if (!db) throw HttpError.serviceUnavailable("Database unavailable");
+
+    // The existence check is a round trip this route could skip — an unknown id
+    // simply matches no replies — and it is here because "this ticket has no
+    // replies yet" and "there is no such ticket" are different answers, and
+    // answering the first for the second turns a dead link into an empty thread
+    // that looks like a working page.
+    const [exists] = await db
+      .select({ id: ticket.id })
+      .from(ticket)
+      .where(eq(ticket.id, id.data))
+      .limit(1);
+    if (!exists) throw HttpError.notFound(`Ticket ${id.data} not found`);
+
+    const rows = await db
+      .select({ reply: ticketReply, author: user })
+      .from(ticketReply)
+      .innerJoin(user, eq(user.id, ticketReply.authorId))
+      .where(eq(ticketReply.ticketId, id.data))
+      // Ascending, because a thread is read top to bottom, and tiebroken by id
+      // for the reason the queue's cursor is: two replies written in the same
+      // millisecond are otherwise ordered by whatever the plan produced, and a
+      // conversation that reshuffles between reloads reads as a bug.
+      .orderBy(asc(ticketReply.createdAt), asc(ticketReply.id));
+
+    const body: ListTicketRepliesResponse = {
+      data: rows.map((row) => toTicketReply(row.reply, toUser(row.author))),
+    };
+
+    res.json(body);
+  });
+
+  /**
+   * Write a reply.
+   *
+   * Open to any signed-in staff member, like the PATCH above and unlike every
+   * user route: answering a student is the work a queue exists for, not a
+   * supervisor act.
+   *
+   * **Nothing is delivered.** There is no email provider in this repo, so this
+   * records what was said and does not send it — the same gap
+   * `dev/send-inbound-email.ts` stands in for on the way in. When a provider
+   * lands, this is the seam it hooks into, and the reply row is what it sends.
+   */
+  router.post("/tickets/:id/replies", async (req, res) => {
+    const id = ticketSummarySchema.shape.id.safeParse(req.params.id);
+    if (!id.success) throw HttpError.badRequest("Malformed ticket id");
+
+    // Both validations before the database check, as everywhere else here.
+    // Throws ZodError, including for an unknown key — the schema is strict.
+    const input = createTicketReplyBodySchema.parse(req.body);
+
+    // `requireAuth` populates this and the router is mounted behind it, so the
+    // guard is for a wiring mistake rather than for a request. It is a 401
+    // because that is the fail-closed answer to not knowing who is asking —
+    // and the author cannot come from the body: a payload that named its own
+    // author would let anyone sign a reply with a colleague's name.
+    if (!req.user) throw HttpError.unauthorized();
+
+    req.log.debug({ ticketId: id.data }, "replying to ticket");
+
+    if (!db) throw HttpError.serviceUnavailable("Database unavailable");
+
+    // Read the ticket first, so an unknown id is a 404 rather than a foreign
+    // key violation surfacing as a 500. Deliberately *not* a status check:
+    // `closed` is terminal for the status lifecycle, and a closed ticket that
+    // cannot be added to is a separate policy nobody has asked for — the
+    // ordinary case is a last word after something is closed out.
+    const [exists] = await db
+      .select({ id: ticket.id })
+      .from(ticket)
+      .where(eq(ticket.id, id.data))
+      .limit(1);
+    if (!exists) throw HttpError.notFound(`Ticket ${id.data} not found`);
+
+    const [row] = await db
+      .insert(ticketReply)
+      .values({
+        ticketId: id.data,
+        authorId: req.user.id,
+        body: input.body,
+      })
+      .returning();
+
+    // `returning()` on a single-row insert always yields it, so this is a
+    // narrowing for the type rather than a case that happens.
+    if (!row) throw HttpError.serviceUnavailable("Database unavailable");
+
+    /*
+     * The ticket row is deliberately left alone.
+     *
+     * `ticket.updatedAt` is `$onUpdate`, and the queue's default sort is on it,
+     * so touching the ticket here would move it to the top of the queue every
+     * time anyone replied. That is a real feature — "recently active" is what a
+     * support queue usually sorts by — and it is a decision about the queue
+     * rather than a side effect of this route, so it is not made here. Making
+     * it later means an UPDATE in a transaction with this insert, plus the SPA
+     * invalidating ["tickets"] on a successful reply.
+     *
+     * The author is `req.user`, which `requireAuth` built from the session, so
+     * the byline needs no second lookup.
+     */
+    const body: CreateTicketReplyResponse = toTicketReply(row, req.user);
+
+    res.status(201).json(body);
   });
 
   return router;

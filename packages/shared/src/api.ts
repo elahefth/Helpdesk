@@ -51,7 +51,9 @@ export type UserSummary = z.infer<typeof userSummarySchema>;
 
 /**
  * A ticket as the list view needs it. One row is one email that arrived at the
- * support address; there is no thread yet, so there is no message count.
+ * support address. A ticket has a reply thread now, and there is deliberately
+ * no reply count here — the queue does not show one, and counting replies per
+ * row would put a correlated subquery on every list request to render nothing.
  *
  * The assignee is deliberately *not* here, and its absence is the same
  * judgement `body`'s is: the queue does not show who owns a ticket, so putting
@@ -246,6 +248,107 @@ export type UpdateTicketBody = z.infer<typeof updateTicketBodySchema>;
 /** The updated ticket, in the same shape GET /api/tickets/:id answers with. */
 export const updateTicketResponseSchema = ticketDetailSchema;
 export type UpdateTicketResponse = TicketDetail;
+
+/**
+ * How long a reply may be.
+ *
+ * Generous by the standards of a form and tight by the standards of a `text`
+ * column, which is the point: the ceiling exists so a paste accident or a
+ * scripted caller cannot write an unbounded row, not to tell an agent how much
+ * to explain. It is in the shared schema, so the form counts against the same
+ * number the API enforces.
+ */
+export const TICKET_REPLY_MAX_LENGTH = 10_000;
+
+/**
+ * One reply on a ticket's thread — what a member of staff said back.
+ *
+ * This is deliberately not the same shape as the ticket's own `body`. That is
+ * the email that created the ticket, and it has a student on the other end of
+ * it; a reply has a staff account, which is why `author` is a `User` rather
+ * than a name and an address. The detail page renders the email first and the
+ * thread under it for the same reason.
+ *
+ * `author` is not nullable: `ticket_reply.author_id` is NOT NULL with a foreign
+ * key, so the row cannot exist without one, and the route joins rather than
+ * left-joins to say so. A soft-deleted colleague still appears here — the user
+ * row survives a delete precisely so past work can name who did it — so a
+ * byline may name an account that is in no list and can no longer sign in.
+ *
+ * There is no `updatedAt` and no edit route: a reply is a thing that was said.
+ */
+export const ticketReplySchema = z.object({
+  id: z.string().uuid(),
+  /**
+   * The ticket it belongs to. Redundant with the URL it was fetched from, and
+   * carried anyway so a reply is self-describing once it is out of that
+   * response — the SPA writes these into a per-ticket cache entry, and a shape
+   * that only makes sense next to the request that produced it is the kind that
+   * gets mis-filed.
+   */
+  ticketId: z.string().uuid(),
+  body: z.string(),
+  author: userSchema,
+  createdAt: z.string().datetime(),
+});
+export type TicketReply = z.infer<typeof ticketReplySchema>;
+
+/**
+ * GET /api/tickets/:id/replies — a ticket's whole thread, oldest first.
+ *
+ * Unpaginated, for the reason `listAssigneesResponseSchema` is: a thread is
+ * read as a conversation, and a conversation with a "load more" in the middle
+ * of it is one the reader has to reassemble. A support ticket answered a
+ * hundred times is a different problem from a pagination one.
+ *
+ * A separate request rather than a field on `ticketDetailSchema`, which is the
+ * one design decision here worth stating. PATCH /api/tickets/:id answers with a
+ * `TicketDetail`, so a thread on that shape would be re-sent in full every time
+ * someone changed a status — and the two have different lifetimes in the SPA's
+ * cache, since posting a reply must not invalidate the ticket and changing a
+ * status must not refetch the thread.
+ */
+export const listTicketRepliesResponseSchema = z.object({
+  data: z.array(ticketReplySchema),
+});
+export type ListTicketRepliesResponse = z.infer<
+  typeof listTicketRepliesResponseSchema
+>;
+
+/**
+ * Body for POST /api/tickets/:id/replies. Any signed-in staff member may send
+ * one, like PATCH beside it and for the same reason: answering a student is the
+ * work, not a supervisor act.
+ *
+ * The author is absent deliberately rather than forgotten — it comes from the
+ * session, the way `role` is refused on the user writes. A body that could name
+ * its own author would let anyone sign a reply with a colleague's name.
+ *
+ * `strictObject`, like every other write here: a plain `z.object` strips a key
+ * it does not know, so a caller that spelled the field `text` would be answered
+ * 201 having posted an empty reply — except it would not, because `body` is
+ * required, which is the version of that failure with a message attached.
+ */
+export const createTicketReplyBodySchema = z.strictObject({
+  /**
+   * Trimmed, then required. A reply of only whitespace is a misfire — the
+   * Enter key on an empty box — and storing one puts a blank bubble in a thread
+   * that nobody can delete.
+   */
+  body: z
+    .string()
+    .trim()
+    .min(1, "Write a reply before sending it.")
+    .max(
+      TICKET_REPLY_MAX_LENGTH,
+      `A reply cannot be longer than ${TICKET_REPLY_MAX_LENGTH.toLocaleString("en-US")} characters.`,
+    ),
+});
+export type CreateTicketReplyBody = z.infer<typeof createTicketReplyBodySchema>;
+
+/** POST /api/tickets/:id/replies answers 201 with the reply it created. */
+export const createTicketReplyResponseSchema = ticketReplySchema;
+export type CreateTicketReplyResponse = TicketReply;
 
 /**
  * Who a ticket may be assigned to: every staff account that has not been

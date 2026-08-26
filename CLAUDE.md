@@ -135,7 +135,7 @@ Staff-only console: students never log in. Sessions live in the `session` table 
 
 ### Ingestion — email becomes a ticket
 
-`POST /api/inbound-email` is the whole of it. One delivered email becomes one `ticket` row; there is no worker, no queue, no message table, and no classifier.
+`POST /api/inbound-email` is the whole of it. One delivered email becomes one `ticket` row; there is no worker, no queue, and no classifier. The `ticket_reply` table beside it holds the *outbound* half — see Replies below — and is not an inbound message table: a student's reply still opens a new ticket.
 
 - **It is the API's only unauthenticated write, and necessarily so.** Whatever delivers the mail — a provider webhook, a forwarding script, `bun run email:send` — holds no session and never will. It is mounted at `/api` *above* `requireAuth` in `app.ts` for that reason, and `INBOUND_EMAIL_SECRET` presented as `x-inbound-secret` stands in for the session. That secret is optional in development (a local `curl` should not need a ceremony) and `env.ts` refuses to boot in production without one, exactly like `BETTER_AUTH_SECRET`. The comparison lives in the exported pure function `isAuthorizedSource` because `env` is parsed once at import — a test cannot configure a secret and then make a request against it, so the guard has to be reachable some other way, and an untested guard on the one open write is not worth having.
 - **`inboundEmailBodySchema` is the provider seam, not a provider payload.** It is the small intersection every provider can produce; a Mailgun or SES adapter's entire job becomes mapping its webhook onto this shape and posting it, so nothing downstream ever sees a provider-shaped object. It is `strictObject` for a sharper reason than the user writes: a plain `z.object` strips unknown keys, so an adapter that spelled the body `bodyText` would have the email's contents silently dropped and still be answered 201.
@@ -234,6 +234,62 @@ opening it.
   non-obvious caller is `inbound-email.ts`'s duplicate-delivery path: the first
   delivery is unassigned by definition, but the *existing* row has been there as
   long as the retry took, so that branch joins rather than assumes.
+
+### Replies — the ticket's thread
+
+`GET /api/tickets/:id/replies` and `POST /api/tickets/:id/replies`, rendered on
+the ticket detail page under the email. One `ticket_reply` row is one thing a
+member of staff said back.
+
+- **Nothing is delivered.** There is no email provider in this repo, so a reply
+  is recorded and not sent — the mirror image of the gap
+  `dev/send-inbound-email.ts` stands in for on the way in. The form says so
+  under the textarea rather than leaving an agent to believe a student has been
+  written to. When a provider lands, `POST …/replies` is the seam it hooks into.
+- **It is not a message table, and that is the design decision worth knowing.**
+  The ticket's own `body` is the email that created it and stays on `ticket`;
+  replies are a separate table with a `user` author. A uniform message table is
+  what a *student* reply would need — an author who is not a `user`, a
+  direction, a source message id — and nothing ingests one: inbound mail always
+  opens a new ticket. Merging the two now would be a schema shaped for an
+  integration nobody has written.
+- **The thread is a separate request from the ticket, not a field on
+  `ticketDetailSchema`.** `PATCH /api/tickets/:id` answers with a
+  `TicketDetail`, so a thread on that shape would be re-sent in full every time
+  someone changed a status. The two also have different lifetimes in the SPA's
+  cache: posting a reply must not refetch the ticket, and changing a status must
+  not refetch the conversation. The key is `["ticket", id, "replies"]`, nested
+  under the ticket's so a future prefix invalidate takes both.
+- **Unpaginated, like `GET /api/assignees`.** A conversation with a "load more"
+  in the middle is one the reader reassembles. A ticket with enough replies to
+  need a cursor is a different problem.
+- **The author comes from the session and cannot come from the body.**
+  `createTicketReplyBodySchema` is a `strictObject` with one field, so a payload
+  carrying `authorId` is answered rather than stripped — otherwise anyone could
+  sign a reply with a colleague's name. `toTicketReply` therefore takes a `User`
+  rather than a `UserRow`: the write already holds the session's user, and only
+  the thread query has a row to map.
+- **`author_id` is NOT NULL with no `onDelete`**, unlike `ticket.assigned_to_id`'s
+  `set null`. A reply always names its author, and a soft-deleted colleague
+  keeps their byline for the same reason they stay assigned — the user row
+  survives a delete precisely so past work can name who did it. The thread's
+  join is therefore an `innerJoin` and does not filter `deletedAt`.
+  `ticket_id` is the opposite case and cascades: a reply is part of its ticket,
+  not a reference to one.
+- **Writing a reply deliberately does not touch the ticket row.**
+  `ticket.updatedAt` is `$onUpdate` and the queue's default sort is on it, so an
+  UPDATE here would move a ticket to the top of the queue every time anyone
+  replied. That is a real feature — "recently active" is what a support queue
+  usually sorts by — and it is a decision about the queue rather than a side
+  effect of this route. Making it means a transaction around the insert, plus
+  the SPA invalidating `["tickets"]` on a successful reply.
+- **A reply is immutable**: no `updated_at` column and no edit or delete route.
+  Add the column when there is an editor to justify it.
+- **The SPA appends the response rather than invalidating**, the opposite of
+  what the sidebar does with the queue: the POST answers with the new row in the
+  shape the list holds, so an invalidate would round-trip for something already
+  in hand and blank the conversation while it did. The cost is a colleague's
+  reply written in the meantime, which arrives on the next mount.
 
 ### Web
 

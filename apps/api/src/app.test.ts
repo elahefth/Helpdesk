@@ -276,6 +276,87 @@ describe("ticket assignment", () => {
   });
 });
 
+/**
+ * The reply thread. Open to every signed-in agent for the reason the PATCH
+ * beside it is: answering a student is the work a queue exists for, not a
+ * supervisor act.
+ *
+ * With no DATABASE_URL the furthest a valid request gets is the database check,
+ * so a 503 is the pass here too — it means the auth guard admitted an agent and
+ * the body parsed. A 403 would mean someone attached requireRole to it.
+ */
+describe("ticket replies", () => {
+  const TICKET = "/api/tickets/00000000-0000-4000-8000-0000000000aa";
+  const REPLIES = `${TICKET}/replies`;
+  const REPLY = { body: "Have you tried a password reset?" };
+
+  it("rejects an unauthenticated read", async () => {
+    const res = await get(REPLIES);
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects an unauthenticated write", async () => {
+    const res = await postAs("anon", REPLIES, REPLY);
+    expect(res.status).toBe(401);
+  });
+
+  it("admits an agent to the thread", async () => {
+    const res = await getAuthedAs("agent", REPLIES);
+    expect(res.status).toBe(503);
+    expect((await body(res)).error.code).toBe("service_unavailable");
+  });
+
+  it("admits an agent to the write, not just an admin", async () => {
+    const res = await postAs("agent", REPLIES, REPLY);
+    expect(res.status).toBe(503);
+    expect((await body(res)).error.code).toBe("service_unavailable");
+  });
+
+  /**
+   * The nested path must not be swallowed by `/tickets/:id`, which sits above
+   * it and matches one segment. If it were, this would answer a ticket detail
+   * for a request that asked for a thread.
+   */
+  it("does not fall through to the ticket route", async () => {
+    const res = await postAs("agent", REPLIES, REPLY);
+    // A GET on /tickets/:id would not accept a POST at all, so reaching the
+    // database check is what says the nested route matched.
+    expect(res.status).toBe(503);
+  });
+
+  it("rejects a malformed ticket id before touching the database", async () => {
+    expect(
+      (await getAuthedAs("agent", "/api/tickets/nope/replies")).status,
+    ).toBe(400);
+    const res = await postAs("agent", "/api/tickets/nope/replies", REPLY);
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("bad_request");
+  });
+
+  it.each([
+    ["an empty reply", { body: "" }],
+    ["a whitespace-only reply", { body: "   " }],
+    ["no body at all", {}],
+  ])("rejects %s", async (_label, payload) => {
+    const res = await postAs("agent", REPLIES, payload);
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  /**
+   * The author is the session's, and the schema is strict, so an attempt to
+   * sign a reply with somebody else's id is answered rather than stripped.
+   */
+  it("refuses a reply that names its own author", async () => {
+    const res = await postAs("agent", REPLIES, {
+      ...REPLY,
+      authorId: STUB_USERS.admin.id,
+    });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+});
+
 describe("assignees", () => {
   it("rejects an unauthenticated request", async () => {
     const res = await get("/api/assignees");

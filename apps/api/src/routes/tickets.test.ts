@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import {
+  createTicketReplyBodySchema,
   listTicketsQuerySchema,
+  TICKET_REPLY_MAX_LENGTH,
   updateTicketBodySchema,
 } from "@helpdesk/shared";
 import { searchPattern } from "./tickets.ts";
@@ -156,5 +158,72 @@ describe("updateTicketBodySchema", () => {
         assignee: "44444444-4444-4444-8444-444444444444",
       }),
     ).toThrow();
+  });
+});
+
+/**
+ * The reply body, which is one field and three rules — and every one of them
+ * fails silently if it is wrong: a whitespace-only reply is a blank bubble in a
+ * thread nothing can delete, and an unbounded one is a row nothing can trim.
+ */
+describe("createTicketReplyBodySchema", () => {
+  it("trims the reply", () => {
+    expect(
+      createTicketReplyBodySchema.parse({ body: "  Have you tried…  " }).body,
+    ).toBe("Have you tried…");
+  });
+
+  it("keeps the line breaks inside it", () => {
+    // Trimmed at the ends only. The interior newlines are the reply's only
+    // structure, the same way they are the email's.
+    const body = "Hi Ada,\n\nTry a password reset.\n\nThanks";
+    expect(createTicketReplyBodySchema.parse({ body }).body).toBe(body);
+  });
+
+  it.each([
+    ["empty", ""],
+    ["whitespace only", "   \n  "],
+  ])("rejects a %s reply", (_label, body) => {
+    expect(createTicketReplyBodySchema.safeParse({ body }).success).toBe(false);
+  });
+
+  it("rejects a reply past the length ceiling", () => {
+    expect(
+      createTicketReplyBodySchema.safeParse({
+        body: "x".repeat(TICKET_REPLY_MAX_LENGTH + 1),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts one exactly at it", () => {
+    expect(
+      createTicketReplyBodySchema.safeParse({
+        body: "x".repeat(TICKET_REPLY_MAX_LENGTH),
+      }).success,
+    ).toBe(true);
+  });
+
+  /**
+   * The author comes from the session, never the payload. A body that could
+   * name its own author would let anyone sign a reply with a colleague's name,
+   * and a plain `z.object` would strip the attempt and answer 201 as though
+   * nothing had been asked for.
+   */
+  it("refuses a body that names its own author", () => {
+    const parsed = createTicketReplyBodySchema.safeParse({
+      body: "Signed, somebody else",
+      authorId: "44444444-4444-4444-8444-444444444444",
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("refuses a key it does not know rather than dropping it", () => {
+    // The failure this guards against looks exactly like success: `text` would
+    // be stripped, `body` would be missing, and the caller would be told what
+    // they got wrong only by luck.
+    expect(
+      createTicketReplyBodySchema.safeParse({ text: "Have you tried…" })
+        .success,
+    ).toBe(false);
   });
 });

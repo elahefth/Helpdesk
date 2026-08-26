@@ -43,6 +43,13 @@
       "when": 1787739119020,
       "tag": "0005_nasty_famine",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1787742289711,
+      "tag": "0006_boring_turbo",
+      "breakpoints": true
     }
   ]
 }

@@ -19,6 +19,7 @@ import {
   listAssignees,
   updateTicket,
 } from "../lib/api.ts";
+import { TicketThread } from "./TicketThread.tsx";
 import { useSession } from "../lib/auth-client.ts";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
@@ -207,6 +208,15 @@ function TicketView({ ticket }: { ticket: TicketDetail }) {
             <div className="whitespace-pre-wrap break-words">{ticket.body}</div>
           </CardContent>
         </Card>
+
+        {/*
+          Under the email, inside the same article: the email is the first thing
+          in the conversation and the replies are the rest of it, so they are one
+          reading order rather than two panels. The sidebar stays where it is —
+          everything in it is a decision about the ticket, and a reply is not
+          one.
+        */}
+        <TicketThread ticketId={ticket.id} />
       </article>
 
       <TicketControls ticket={ticket} />

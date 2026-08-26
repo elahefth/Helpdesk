@@ -73,7 +73,12 @@ const patched: unknown[] = [];
 beforeEach(() => {
   requests.length = 0;
   patched.length = 0;
-  handlers = {};
+  // Every loaded page fetches its reply thread as well, and almost none of the
+  // tests here are about it — so it is answered empty by default rather than
+  // stubbed once per test. TicketThread.test.tsx is where the thread itself is
+  // covered; a test here that leaves this unstubbed would fail with a thread
+  // error alert beside whatever it was actually asserting.
+  handlers = { [`GET ${TICKET_PATH}/replies`]: jsonResponse({ data: [] }) };
   session.current = null;
   // unstubGlobals in vitest.config.ts puts happy-dom's fetch back afterwards.
   vi.stubGlobal(
@@ -264,7 +269,10 @@ describe("TicketDetailPage", () => {
     release();
 
     await screen.findByRole("heading", { name: /Cannot log in/ });
-    expect(document.querySelectorAll('[data-slot="skeleton"]').length).toBe(0);
+    // The page's own placeholder, named rather than counted: the reply thread
+    // renders a second skeleton of its own while it loads, so a count of every
+    // skeleton in the document no longer answers "has the ticket arrived".
+    expect(screen.queryByText("Loading ticket…")).toBeNull();
   });
 
   /**

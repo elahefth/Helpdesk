@@ -139,3 +139,86 @@ export const ticket = pgTable(
     index("ticket_student_email_idx").on(table.studentEmail),
   ],
 );
+
+/**
+ * A staff reply on a ticket's thread.
+ *
+ * The ticket's own `body` is the email that created it and is not part of this
+ * table — one delivered email is still one ticket, and the thread is what the
+ * support team has said back. So the detail page renders `ticket.body` first
+ * and these under it, rather than the two being rows of one uniform message
+ * table. That table is what a *student* reply would need (an author who is not
+ * a `user`, a direction, a source message id), and nothing ingests one yet:
+ * `POST /api/inbound-email` always opens a new ticket. Merging the two now
+ * would be a schema shaped for an integration nobody has written.
+ *
+ * Nothing here is delivered anywhere. There is no email provider in this repo,
+ * so writing a reply records what was said and does not send it — the same gap
+ * `dev/send-inbound-email.ts` stands in for on the way in.
+ */
+export const ticketReply = pgTable(
+  "ticket_reply",
+  {
+    id: uuid("id")
+      .default(sql`pg_catalog.gen_random_uuid()`)
+      .primaryKey(),
+
+    /**
+     * `cascade`, unlike `ticket.assigned_to_id`'s `set null`, and the asymmetry
+     * is the difference between a reference and a part. A reply is only ever
+     * about one ticket and means nothing without it, so a deleted ticket must
+     * not leave its thread behind as unreachable rows. Nothing deletes a ticket
+     * today; this says what happens when something does.
+     */
+    ticketId: uuid("ticket_id")
+      .notNull()
+      .references(() => ticket.id, { onDelete: "cascade" }),
+
+    /**
+     * Who wrote it. NOT NULL and with no `onDelete` clause — so the default,
+     * NO ACTION — which are two halves of one rule: a reply always names its
+     * author. `set null` would be the assignee's answer and is wrong here,
+     * because "somebody on the team said this" is not something a thread can
+     * usefully record, and `cascade` would delete what was said along with the
+     * person who said it.
+     *
+     * It should never fire either way: `DELETE /api/users/:id` is a soft delete
+     * and the row survives precisely so past work can still name who did it. A
+     * departed colleague keeps their replies and keeps their byline, the same
+     * way they stay assigned to their tickets.
+     */
+    authorId: uuid("author_id")
+      .notNull()
+      .references(() => user.id),
+
+    /** The reply text, verbatim apart from a trim. Plain text, like the email. */
+    body: text("body").notNull(),
+
+    /**
+     * `timestamptz` with `precision: 3`, matching `ticket` rather than the
+     * generated auth tables. The thread is ordered by it, so the reasons are
+     * the same ones spelled out on `ticket.createdAt` — a naive timestamp
+     * round-tripped through the host's offset and a microsecond column
+     * truncated into a JS `Date` both go wrong silently.
+     *
+     * There is no `updatedAt`, and its absence is the shape of the feature: a
+     * reply is a thing that was said, so there is no route that edits one. Add
+     * the column when there is an editor to justify it.
+     */
+    createdAt: timestamp("created_at", { withTimezone: true, precision: 3 })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    // The only query there is: one ticket's thread, oldest first. `id` rides
+    // along as the tiebreaker for the same reason it does in the queue's
+    // indexes — two replies posted in the same millisecond are not ordered by
+    // `created_at` alone, and a thread that reshuffles between reloads reads as
+    // a bug in the conversation.
+    index("ticket_reply_ticket_id_created_at_id_idx").on(
+      table.ticketId,
+      table.createdAt,
+      table.id,
+    ),
+  ],
+);
