@@ -2,6 +2,7 @@ import {
   apiErrorSchema,
   createUserResponseSchema,
   deleteUserResponseSchema,
+  listAssigneesResponseSchema,
   listTicketsResponseSchema,
   listUsersResponseSchema,
   readinessSchema,
@@ -10,12 +11,15 @@ import {
   type CreateUserBody,
   type CreateUserResponse,
   type DeleteUserResponse,
+  type ListAssigneesResponse,
   type ListTicketsQuery,
   type ListTicketsResponse,
   type ListUsersQuery,
   type ListUsersResponse,
   type Readiness,
   type TicketDetail,
+  type UpdateTicketBody,
+  type UpdateTicketResponse,
   type UpdateUserBody,
   type UpdateUserResponse,
 } from "@helpdesk/shared";
@@ -106,6 +110,32 @@ export function listTickets(
  */
 export function getTicket(id: string): Promise<TicketDetail> {
   return request(`/api/tickets/${encodeURIComponent(id)}`, ticketDetailSchema);
+}
+
+/**
+ * Assign a ticket, or hand it back to the unassigned pool with a null
+ * `assigneeId`. Open to any signed-in staff member, unlike the user routes.
+ *
+ * `JSON.stringify` keeps an explicit null and drops an undefined key, which is
+ * exactly the wire distinction the API reads — absent is "leave it alone" — so
+ * neither case needs special handling here.
+ */
+export function updateTicket(
+  id: string,
+  body: UpdateTicketBody,
+): Promise<UpdateTicketResponse> {
+  return request(`/api/tickets/${encodeURIComponent(id)}`, ticketDetailSchema, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Who a ticket can be assigned to. Unpaginated by design — this fills a picker,
+ * and a picker needs every option at once — so there is no query parameter.
+ */
+export function listAssignees(): Promise<ListAssigneesResponse> {
+  return request("/api/assignees", listAssigneesResponseSchema);
 }
 
 /** Admin-only server-side; a non-admin session gets a 403 here, not a redirect. */

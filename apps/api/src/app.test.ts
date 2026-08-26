@@ -195,6 +195,102 @@ describe("tickets", () => {
   });
 });
 
+/**
+ * Assignment is the one ticket write, and the one route that is deliberately
+ * open to every signed-in agent rather than admin-gated — a queue where only a
+ * supervisor can say who picked something up is not a queue anyone can work.
+ *
+ * With no DATABASE_URL the furthest a valid request gets is the database check,
+ * so a 503 here is the pass: it means the auth guard let an *agent* through and
+ * the body parsed. A 403 would mean someone attached requireRole to it.
+ */
+describe("ticket assignment", () => {
+  const TICKET = "/api/tickets/00000000-0000-4000-8000-0000000000aa";
+  const ASSIGNEE = "00000000-0000-4000-8000-0000000000bb";
+
+  it("rejects an unauthenticated request", async () => {
+    const res = await patchAs("anon", TICKET, { assigneeId: ASSIGNEE });
+    expect(res.status).toBe(401);
+  });
+
+  it("admits an agent, not just an admin", async () => {
+    const res = await patchAs("agent", TICKET, { assigneeId: ASSIGNEE });
+    expect(res.status).toBe(503);
+    expect((await body(res)).error.code).toBe("service_unavailable");
+  });
+
+  it("accepts an explicit null as unassign", async () => {
+    const res = await patchAs("agent", TICKET, { assigneeId: null });
+    expect(res.status).toBe(503);
+  });
+
+  it("rejects a malformed ticket id before touching the database", async () => {
+    const res = await patchAs("agent", "/api/tickets/not-a-uuid", {
+      assigneeId: ASSIGNEE,
+    });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("bad_request");
+  });
+
+  it("rejects an assignee id that is not a uuid", async () => {
+    const res = await patchAs("agent", TICKET, { assigneeId: "somebody" });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  it("accepts a status change", async () => {
+    const res = await patchAs("agent", TICKET, { status: "resolved" });
+    expect(res.status).toBe(503);
+  });
+
+  it("accepts a category, and an explicit null to take one off", async () => {
+    expect(
+      (await patchAs("agent", TICKET, { category: "technical" })).status,
+    ).toBe(503);
+    expect((await patchAs("agent", TICKET, { category: null })).status).toBe(
+      503,
+    );
+  });
+
+  it("rejects a status the domain no longer has", async () => {
+    const res = await patchAs("agent", TICKET, { status: "pending" });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  it("rejects a category the domain no longer has", async () => {
+    const res = await patchAs("agent", TICKET, { category: "billing" });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+
+  /**
+   * The body schema is strict, and this is what that buys: a caller that
+   * spelled the field `assignee` is told so, rather than being answered 200 for
+   * a request that changed nothing.
+   */
+  it("rejects a key it does not know", async () => {
+    const res = await patchAs("agent", TICKET, { assignee: ASSIGNEE });
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+});
+
+describe("assignees", () => {
+  it("rejects an unauthenticated request", async () => {
+    const res = await get("/api/assignees");
+    expect(res.status).toBe(401);
+  });
+
+  // Open to agents on purpose: you cannot hand a ticket to a colleague you are
+  // not allowed to see. The admin-gated /api/users is the other list.
+  it("admits an agent as far as the database check", async () => {
+    const res = await getAuthedAs("agent", "/api/assignees");
+    expect(res.status).toBe(503);
+    expect((await body(res)).error.code).toBe("service_unavailable");
+  });
+});
+
 describe("users (admin only)", () => {
   it("rejects an unauthenticated request", async () => {
     const res = await get("/api/users");

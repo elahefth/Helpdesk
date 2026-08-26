@@ -9,6 +9,7 @@ import {
   type CreateUserBody,
   type CreateUserResponse,
   type DeleteUserResponse,
+  type ListAssigneesResponse,
   type ListUsersResponse,
   type UpdateUserResponse,
 } from "@helpdesk/shared";
@@ -268,6 +269,63 @@ export function createUsersRouter(
         createdAt: row.createdAt.toISOString(),
       })),
       nextCursor: hasMore && last ? encodeCursor(last.email) : null,
+    };
+
+    res.json(body);
+  });
+
+  /**
+   * Who a ticket can be assigned to.
+   *
+   * Open to every signed-in staff member, unlike the admin-gated list above,
+   * because an agent claiming a ticket or handing one to a colleague is the
+   * ordinary way this queue gets worked — and they cannot pick a colleague they
+   * are not allowed to see. It carries less than the admin list for that
+   * reason: no `createdAt`, and nothing about the account beyond what a picker
+   * has to render.
+   *
+   * Both roles are here. An admin is a staff member who works tickets like
+   * anyone else, and excluding them would leave a fresh install — where
+   * `seed:admin` has created exactly one account, an admin — with nobody to
+   * assign anything to.
+   *
+   * Deleted accounts are not, which is the one asymmetry worth knowing: a
+   * soft-deleted assignee stays assigned and stays rendered on the ticket (the
+   * user row survives a delete so a ticket can still name who handled it), but
+   * cannot be *chosen* again. The queue's answer to a departed colleague is to
+   * reassign their tickets, not to have them silently become unowned.
+   *
+   * Unpaginated, unlike GET /users. A picker needs every option at once — a
+   * cursor would mean the person you are looking for might be on a page the
+   * control never fetched. Ordered by name so the list reads the way it renders,
+   * tiebroken by email because two people can share a name and a select with two
+   * identical rows in an unstable order is a coin flip.
+   */
+  router.get("/assignees", async (req, res) => {
+    req.log.debug("listing assignees");
+
+    if (!db) throw HttpError.serviceUnavailable("Database unavailable");
+
+    const rows = await db
+      .select({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+      })
+      .from(user)
+      .where(isNull(user.deletedAt))
+      .orderBy(asc(user.name), asc(user.email));
+
+    const body: ListAssigneesResponse = {
+      data: rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        email: row.email,
+        // `role` is nullable in the generated auth schema even though the
+        // column defaults to 'agent' — same guard as the list above.
+        role: row.role ?? "agent",
+      })),
     };
 
     res.json(body);

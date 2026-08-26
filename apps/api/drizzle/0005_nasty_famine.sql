@@ -1,0 +1,2 @@
+ALTER TABLE "ticket" ADD COLUMN "assigned_to_id" uuid;--> statement-breakpoint
+ALTER TABLE "ticket" ADD CONSTRAINT "ticket_assigned_to_id_user_id_fk" FOREIGN KEY ("assigned_to_id") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;

@@ -8,6 +8,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { TICKET_CATEGORIES, TICKET_STATUSES } from "@helpdesk/shared";
+import { user } from "./auth-schema.ts";
 
 /**
  * Hand-written, unlike auth-schema.ts — `@better-auth/cli generate` owns that
@@ -60,6 +61,28 @@ export const ticket = pgTable(
      * stated a category, or a human, ever sets it.
      */
     category: ticketCategoryEnum("category"),
+
+    /**
+     * The staff member who owns this ticket, or NULL for the unassigned pool
+     * every ticket arrives in — nothing routes, so an owner is always a human
+     * decision and a default would be a guess wearing one's clothes.
+     *
+     * `on delete set null` rather than `cascade` (which would delete tickets)
+     * or `restrict` (which would make a user undeletable). It should never
+     * fire: DELETE /api/users/:id is a soft delete and marks the row instead,
+     * which is deliberate — the user row survives precisely so a ticket can
+     * still name who handled it. So a soft-deleted assignee stays assigned and
+     * stays rendered, and the constraint covers only the case where someone
+     * removes a row by hand.
+     *
+     * No index, on the same reasoning the search's `ilike` carries: nothing
+     * queries by this column yet. The queue neither shows nor filters by the
+     * assignee, so an index here would be a write cost bought against a query
+     * plan that does not exist. An "assigned to" filter is what justifies one.
+     */
+    assignedToId: uuid("assigned_to_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
 
     /**
      * The provider's Message-ID, UNIQUE so a redelivered webhook cannot create

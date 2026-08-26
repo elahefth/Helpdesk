@@ -3,7 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { inboundEmailBodySchema } from "@helpdesk/shared";
 import type { Database } from "../db/client.ts";
-import { ticket } from "../db/schema.ts";
+import { ticket, user } from "../db/schema.ts";
 import { env } from "../env.ts";
 import { HttpError } from "../middleware/errors.ts";
 import { toTicketDetail } from "./ticket-mappers.ts";
@@ -124,7 +124,9 @@ export function createInboundEmailRouter(db: Database | undefined): Router {
       .returning();
 
     if (created) {
-      res.status(201).json(toTicketDetail(created));
+      // Explicitly unassigned: a ticket arrives in the unassigned pool,
+      // because nothing routes.
+      res.status(201).json(toTicketDetail(created, null));
       return;
     }
 
@@ -133,8 +135,13 @@ export function createInboundEmailRouter(db: Database | undefined): Router {
     // exactly where its email went — a 409 would read as "your email was
     // rejected" for mail that was in fact accepted the first time.
     const [existing] = await db
-      .select()
+      .select({ ticket, assignee: user })
       .from(ticket)
+      // The one place ingestion has to care who owns a ticket. The first
+      // delivery is unassigned by definition, but this row has existed for as
+      // long as the retry took, and somebody may have picked it up in between —
+      // so the duplicate's answer is joined rather than assumed.
+      .leftJoin(user, eq(user.id, ticket.assignedToId))
       // Non-null: `onConflictDoNothing` can only have fired on this column, and
       // a NULL messageId cannot conflict (NULLs are distinct under a unique
       // index), so reaching here means one was supplied.
@@ -151,7 +158,7 @@ export function createInboundEmailRouter(db: Database | undefined): Router {
       );
     }
 
-    res.status(200).json(toTicketDetail(existing));
+    res.status(200).json(toTicketDetail(existing.ticket, existing.assignee));
   });
 
   return router;

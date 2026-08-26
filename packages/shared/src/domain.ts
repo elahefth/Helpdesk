@@ -41,6 +41,21 @@ export function canTransition(from: TicketStatus, to: TicketStatus): boolean {
   return TICKET_STATUS_TRANSITIONS[from].includes(to);
 }
 
+/**
+ * How a status is written when it is a choice rather than a tag.
+ *
+ * The queue renders the raw value inside a badge, where lowercase reads as a
+ * label; a select is a sentence the reader is completing ("Status: Resolved"),
+ * and lowercase there reads as a bug. `CATEGORY_LABELS` below exists for the
+ * same reason and this is its counterpart, so the two controls on the ticket
+ * page are written the same way.
+ */
+export const TICKET_STATUS_LABELS: Record<TicketStatus, string> = {
+  open: "Open",
+  resolved: "Resolved",
+  closed: "Closed",
+};
+
 export const TICKET_CATEGORIES = [
   "general_questions",
   "technical",

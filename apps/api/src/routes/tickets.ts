@@ -1,12 +1,16 @@
 import { Router } from "express";
-import { and, count, eq, ilike, or, type SQL } from "drizzle-orm";
+import { and, count, eq, ilike, isNull, or, type SQL } from "drizzle-orm";
 import {
+  canTransition,
   listTicketsQuerySchema,
   ticketSummarySchema,
+  updateTicketBodySchema,
   type ListTicketsResponse,
+  type TicketDetail,
+  type UpdateTicketResponse,
 } from "@helpdesk/shared";
 import type { Database } from "../db/client.ts";
-import { ticket } from "../db/schema.ts";
+import { ticket, user } from "../db/schema.ts";
 import { HttpError } from "../middleware/errors.ts";
 import { toTicketDetail, toTicketSummary } from "./ticket-mappers.ts";
 import {
@@ -65,6 +69,36 @@ function matchesSearch(term: string): SQL | undefined {
     ilike(ticket.studentEmail, pattern),
     ilike(ticket.body, pattern),
   );
+}
+
+/**
+ * One ticket with its assignee resolved, in a single round trip.
+ *
+ * A LEFT JOIN rather than a second SELECT, and left rather than inner: most
+ * tickets are unassigned, and an inner join would answer "no such ticket" for
+ * every one of them.
+ *
+ * It deliberately does **not** filter `user.deletedAt`. A soft-deleted staff
+ * account keeps its row precisely so a ticket can still name who handled it, so
+ * hiding a deleted assignee here would silently redraw an owned ticket as
+ * unassigned — the one reading that makes the surviving row pointless. They can
+ * no longer be *chosen*: that is `GET /api/assignees`' job, and it does filter.
+ *
+ * Shared by GET and PATCH so the two cannot drift into describing the same
+ * ticket differently.
+ */
+async function findTicketDetail(
+  db: Database,
+  id: string,
+): Promise<TicketDetail | undefined> {
+  const [row] = await db
+    .select({ ticket, assignee: user })
+    .from(ticket)
+    .leftJoin(user, eq(user.id, ticket.assignedToId))
+    .where(eq(ticket.id, id))
+    .limit(1);
+
+  return row ? toTicketDetail(row.ticket, row.assignee) : undefined;
 }
 
 /**
@@ -150,15 +184,111 @@ export function createTicketsRouter(db: Database | undefined): Router {
 
     if (!db) throw HttpError.serviceUnavailable("Database unavailable");
 
-    const [row] = await db
-      .select()
-      .from(ticket)
-      .where(eq(ticket.id, id.data))
-      .limit(1);
+    const detail = await findTicketDetail(db, id.data);
+    if (!detail) throw HttpError.notFound(`Ticket ${id.data} not found`);
 
-    if (!row) throw HttpError.notFound(`Ticket ${id.data} not found`);
+    res.json(detail);
+  });
 
-    res.json(toTicketDetail(row));
+  /**
+   * Assign a ticket, or hand it back to the unassigned pool.
+   *
+   * Deliberately **not** admin-gated, unlike every user route: the console is
+   * staff-only already, and an agent claiming a ticket or passing one to a
+   * colleague is the ordinary way a queue gets worked. Making it a supervisor
+   * act would mean an agent who picks up a ticket cannot say so.
+   */
+  router.patch("/tickets/:id", async (req, res) => {
+    const id = ticketSummarySchema.shape.id.safeParse(req.params.id);
+    if (!id.success) throw HttpError.badRequest("Malformed ticket id");
+
+    // Both validations before the database check, as everywhere else here: a
+    // malformed request deserves a 400 that describes it rather than a 503 that
+    // blames Postgres. Throws ZodError, including for an unknown key — the body
+    // schema is strict.
+    const input = updateTicketBodySchema.parse(req.body);
+
+    req.log.debug({ ticketId: id.data, input }, "updating ticket");
+
+    if (!db) throw HttpError.serviceUnavailable("Database unavailable");
+
+    // Read before writing. Two of the three fields need the row to validate at
+    // all — a status move is legal only relative to the status the ticket is
+    // already in — and it is also what answers 404 for an id that names
+    // nothing, before any of the checks below blame the caller for it.
+    const current = await findTicketDetail(db, id.data);
+    if (!current) throw HttpError.notFound(`Ticket ${id.data} not found`);
+
+    // Every field is optional and absent means "leave it alone", so each check
+    // is on the property being *present* rather than on it being truthy —
+    // `assigneeId: null` and `category: null` are instructions, not omissions.
+    if (input.assigneeId !== undefined && input.assigneeId !== null) {
+      const [target] = await db
+        .select({ id: user.id })
+        .from(user)
+        .where(and(eq(user.id, input.assigneeId), isNull(user.deletedAt)))
+        .limit(1);
+
+      // The foreign key would catch a wholly unknown id, but as a 500 — and it
+      // would not catch a soft-deleted one at all, since that row still exists.
+      // Both are the same mistake from the caller's side, so they get one 400
+      // that says so.
+      if (!target) {
+        throw HttpError.badRequest(
+          "That user does not exist, or has been deleted.",
+        );
+      }
+    }
+
+    /**
+     * The lifecycle, enforced here rather than left to the SPA's disabled
+     * options — those hide a move, they do not prevent one.
+     *
+     * `canTransition` answers false for the identity move as well, which is
+     * correct as a statement about the lifecycle and wrong as an answer to this
+     * request: setting a ticket to the status it already has changed nothing
+     * and should not be an error. So "no change" is filtered out first, and
+     * what reaches `canTransition` is a real move.
+     *
+     * 409 rather than 400: nothing about the payload is malformed — "closed" is
+     * a status, and this ticket simply cannot become it. Re-validating the body
+     * would not help the caller, which is the line HttpError.conflict draws.
+     */
+    const nextStatus =
+      input.status !== undefined && input.status !== current.status
+        ? input.status
+        : undefined;
+
+    if (nextStatus && !canTransition(current.status, nextStatus)) {
+      throw HttpError.conflict(
+        `A ${current.status} ticket cannot become ${nextStatus}.`,
+      );
+    }
+
+    const changes = {
+      ...(input.assigneeId !== undefined
+        ? { assignedToId: input.assigneeId }
+        : {}),
+      ...(nextStatus ? { status: nextStatus } : {}),
+      ...(input.category !== undefined ? { category: input.category } : {}),
+    };
+
+    // Skipping an empty write is not an optimisation. `updatedAt` is
+    // `$onUpdate`, so an UPDATE that sets nothing would still restamp it and
+    // move the ticket to the top of the queue's default sort — a PATCH that
+    // changed nothing must not reorder the queue.
+    if (Object.keys(changes).length > 0) {
+      await db.update(ticket).set(changes).where(eq(ticket.id, id.data));
+    }
+
+    // Read back rather than returning the updated row: the response names the
+    // assignee, and the UPDATE knows only their id. `updatedAt` comes back
+    // freshly stamped here too, which is what the page's "Updated" line shows.
+    const detail = await findTicketDetail(db, id.data);
+    if (!detail) throw HttpError.notFound(`Ticket ${id.data} not found`);
+
+    const body: UpdateTicketResponse = detail;
+    res.json(body);
   });
 
   return router;

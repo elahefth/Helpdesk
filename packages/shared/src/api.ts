@@ -51,8 +51,15 @@ export type UserSummary = z.infer<typeof userSummarySchema>;
 
 /**
  * A ticket as the list view needs it. One row is one email that arrived at the
- * support address; there is no thread yet, so there is no message count and no
- * assignee — both would be columns nothing writes.
+ * support address; there is no thread yet, so there is no message count.
+ *
+ * The assignee is deliberately *not* here, and its absence is the same
+ * judgement `body`'s is: the queue does not show who owns a ticket, so putting
+ * the assignee on the summary would make every list request pay for a join
+ * nothing renders. It lives on `ticketDetailSchema` instead. Adding an
+ * assignee column to the queue is what would move it up here — along with the
+ * join, a sort key and a filter, which is why it is a decision rather than a
+ * field.
  *
  * `category` is nullable because nothing classifies. An email carries no
  * category of its own, and with no AI in the pipeline the only way a ticket
@@ -87,6 +94,22 @@ export type TicketSummary = z.infer<typeof ticketSummarySchema>;
 export const ticketDetailSchema = ticketSummarySchema.extend({
   body: z.string(),
   supportEmail: z.string().email(),
+  /**
+   * The staff member who owns this ticket, resolved rather than left as an id:
+   * the page renders a name, and a bare `assigneeId` would make every viewer
+   * fetch the staff list just to turn it into one.
+   *
+   * `userSchema` rather than a narrower assignee shape, because it is the same
+   * person the user routes describe — a second definition of "a staff member"
+   * is a thing to keep in sync for no gain.
+   *
+   * Null is unassigned, which is how every ticket arrives: nothing routes, so
+   * an owner is always a human decision. It stays null after a soft delete of
+   * whoever was assigned — the user row survives a delete precisely so a ticket
+   * can still name who handled it, so the assignee here may be an account that
+   * appears in no list and can no longer sign in.
+   */
+  assignee: userSchema.nullable(),
 });
 export type TicketDetail = z.infer<typeof ticketDetailSchema>;
 
@@ -181,6 +204,66 @@ export const listTicketsResponseSchema = z.object({
   total: z.number().int().nonnegative(),
 });
 export type ListTicketsResponse = z.infer<typeof listTicketsResponseSchema>;
+
+/**
+ * Body for PATCH /api/tickets/:id. Any signed-in staff may send it.
+ *
+ * `strictObject`, for the reason `inboundEmailBodySchema` is one: a plain
+ * `z.object` strips keys it does not know, so a caller that spelled the field
+ * `assignee` would be answered 200 having changed nothing. A 400 naming the
+ * unknown key is the only version of that a caller can act on.
+ *
+ * `assigneeId` is optional *and* nullable, and the two mean different things —
+ * this is a PATCH, so absent is "leave it alone" and an explicit null is
+ * "unassign". Collapsing them would make it impossible to hand a ticket back to
+ * the unassigned pool, which is the move an agent makes when they cannot take
+ * it after all.
+ *
+ * Three fields, all optional, and a body naming none of them is a read rather
+ * than an error — which is what makes this one route rather than three, and why
+ * it was never `PATCH /api/tickets/:id/assignee`. The SPA sends exactly the
+ * field the reader changed.
+ */
+export const updateTicketBodySchema = z.strictObject({
+  assigneeId: z.string().uuid().nullable().optional(),
+  /**
+   * Not nullable, unlike the other two: a ticket always has a status. The
+   * server additionally checks the move against `TICKET_STATUS_TRANSITIONS` —
+   * "is this a status" is a question the schema can answer, "may this ticket
+   * become that" is not, because the answer depends on the row.
+   */
+  status: ticketStatusSchema.optional(),
+  /**
+   * Nullable, because "unclassified" is a real answer and the only one every
+   * ticket starts with — nothing classifies. Sending null is how a human takes
+   * a category back off, which the same optional/nullable split as `assigneeId`
+   * keeps distinguishable from not mentioning it.
+   */
+  category: ticketCategorySchema.nullable().optional(),
+});
+export type UpdateTicketBody = z.infer<typeof updateTicketBodySchema>;
+
+/** The updated ticket, in the same shape GET /api/tickets/:id answers with. */
+export const updateTicketResponseSchema = ticketDetailSchema;
+export type UpdateTicketResponse = TicketDetail;
+
+/**
+ * Who a ticket may be assigned to: every staff account that has not been
+ * deleted, in one unpaginated list.
+ *
+ * Unpaginated deliberately, unlike `GET /api/users` beside it. This feeds a
+ * picker, and a picker needs every option at once — a cursor would mean the
+ * person you are looking for might be on a page the control never fetched. The
+ * two lists also answer different questions: the user list is the admin
+ * directory and carries `createdAt`, this is "who can own a ticket" and is open
+ * to every signed-in agent, because agents claim and hand off their own work.
+ *
+ * When a support team outgrows a select this wants a search, not a cursor.
+ */
+export const listAssigneesResponseSchema = z.object({
+  data: z.array(userSchema),
+});
+export type ListAssigneesResponse = z.infer<typeof listAssigneesResponseSchema>;
 
 /**
  * Query params for GET /api/users. Admin-only; parsed with this on the server.
