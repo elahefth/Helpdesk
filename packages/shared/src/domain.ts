@@ -140,3 +140,91 @@ export const EDIT_BUCKETS = [
 ] as const;
 export const editBucketSchema = z.enum(EDIT_BUCKETS);
 export type EditBucket = z.infer<typeof editBucketSchema>;
+
+/**
+ * What the automatic resolver did with a ticket — the third state machine on a
+ * ticket row, beside `status` and `classification`, and the one that decides
+ * whether a human ever sees it.
+ *
+ * It answers a question neither of the others can. `status` says where the
+ * ticket stands; `resolved` is the same word whether a person closed it out or
+ * the assistant answered it from the knowledge base, and those are not the same
+ * event to anyone auditing the queue. `classification` says what the sorter
+ * did, which is a different model doing a different job.
+ *
+ * - `skipped` — nobody asked, or the answer stopped mattering. The column's
+ *   default, so every ticket that predates the assistant reads as this rather
+ *   than as work queued against something that will never run; also the state
+ *   of an install with no model or no knowledge base, of a bulk replay, and —
+ *   the case worth knowing — of a ticket a human touched while the assistant
+ *   was still thinking. A person taking the ticket cancels the machine.
+ * - `pending` — queued, or in flight. Written by ingestion in the INSERT that
+ *   creates the row, so it is true from the instant the ticket exists rather
+ *   than from whenever a worker reached it.
+ * - `resolved` — the assistant answered the student from the knowledge base and
+ *   moved the ticket to `resolved`. There is a reply on the thread signed by it.
+ * - `escalated` — the assistant read the email and declined: the knowledge base
+ *   does not cover it, or its own escalation rules say a person must. The
+ *   ticket is an ordinary open ticket and nothing was said to the student.
+ * - `failed` — the model was asked and could not answer: unreachable, throttled
+ *   past the fallback chain, or replying with something unusable. Like
+ *   `escalated` in every way that matters to the queue — a human has it — and
+ *   distinct because only one of the two is a fault worth looking into.
+ *
+ * `escalated` and `failed` are deliberately *not* collapsed into `skipped`.
+ * All three put the ticket in front of a person, and a reader who wants to know
+ * whether the assistant is working at all cannot tell "it declined, correctly"
+ * from "it was never asked" from "it broke" once they are one value.
+ */
+export const TICKET_AUTO_RESOLUTIONS = [
+  "skipped",
+  "pending",
+  "resolved",
+  "escalated",
+  "failed",
+] as const;
+export const ticketAutoResolutionSchema = z.enum(TICKET_AUTO_RESOLUTIONS);
+export type TicketAutoResolution = z.infer<typeof ticketAutoResolutionSchema>;
+
+/**
+ * The auto-resolution states that mean "the assistant has this, or had it".
+ *
+ * The queue hides exactly these by default, which is the whole of the
+ * `handledBy` filter — see `ticketHandlerSchema`. Spelled once, here, because
+ * the predicate lives in the API and the wording of the empty state lives in
+ * the SPA, and a queue whose filter and whose explanation disagree about which
+ * rows are missing is worse than either.
+ *
+ * `pending` is in the list because a ticket the assistant is still reading is
+ * work a human should not start: the two would answer the same student twice,
+ * seconds apart. `resolved` is in it because the ticket is done — the student
+ * has their answer and the thread says who wrote it.
+ */
+export const AI_HANDLED_AUTO_RESOLUTIONS = [
+  "pending",
+  "resolved",
+] as const satisfies readonly TicketAutoResolution[];
+
+/**
+ * Who the queue is being asked about.
+ *
+ * `human` is the default, and it is the reason this parameter exists: tickets
+ * the assistant is answering must not sit in the queue alongside tickets
+ * somebody has to pick up. It excludes `AI_HANDLED_AUTO_RESOLUTIONS` and leaves
+ * everything else — including `escalated` and `failed`, which are precisely the
+ * tickets the assistant handed back.
+ *
+ * The other two exist so the hidden rows are reachable at all. A row no view
+ * can show is not a filtered row, it is a lost one, and "the assistant answered
+ * a student and I cannot see what it said" is the failure this feature would
+ * otherwise ship with.
+ */
+export const TICKET_HANDLERS = ["human", "ai", "all"] as const;
+export const ticketHandlerSchema = z.enum(TICKET_HANDLERS);
+export type TicketHandler = z.infer<typeof ticketHandlerSchema>;
+
+export const TICKET_HANDLER_LABELS: Record<TicketHandler, string> = {
+  human: "Needs a human",
+  ai: "Handled by AI",
+  all: "All",
+};

@@ -12,10 +12,7 @@ import { healthRouter } from "./routes/health.ts";
 import { createInboundEmailRouter } from "./routes/inbound-email.ts";
 import { createTicketsRouter } from "./routes/tickets.ts";
 import { createUsersRouter } from "./routes/users.ts";
-import {
-  createTicketClassification,
-  type ClassificationQueue,
-} from "./ticket-classification.ts";
+import { createTicketJobs, type TicketJobs } from "./ticket-jobs.ts";
 
 export interface CreateAppOptions {
   /** Test seam: inject an auth instance so the guard can be exercised without Postgres. */
@@ -29,7 +26,7 @@ export interface CreateAppOptions {
    * process left pending. Defaulted so nothing else has to know, and so the
    * absence of a model or a database is answered in one place.
    */
-  classification?: ClassificationQueue;
+  jobs?: TicketJobs;
 }
 
 /**
@@ -74,10 +71,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
   // to notFoundHandler.
   app.use(
     "/api",
-    createInboundEmailRouter(
-      db,
-      options.classification ?? createTicketClassification(db),
-    ),
+    createInboundEmailRouter(db, options.jobs ?? createTicketJobs(db)),
   );
 
   // Everything else under /api is staff-only. The auth routes above already

@@ -137,6 +137,12 @@ for (const [index, fixture] of TICKET_FIXTURES.entries()) {
       // mail whose categories are already decided should not pay for a model
       // call per message, nor rewrite a committed corpus's shape.
       ...(classify ? {} : { "x-skip-classification": "1" }),
+      // Always, with no flag to turn it off — unlike classification above.
+      // Letting the assistant see a hundred committed fixtures would write a
+      // hundred replies to addresses out of a fixture file and resolve a
+      // hundred tickets, taking the corpus's status spread with them. See the
+      // header's own note in routes/inbound-email.ts.
+      "x-skip-auto-resolve": "1",
     },
     body: JSON.stringify(body),
   });

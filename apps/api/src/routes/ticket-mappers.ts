@@ -28,6 +28,7 @@ export function toTicketSummary(row: TicketRow): TicketSummary {
     status: row.status,
     category: row.category,
     classification: row.classification,
+    autoResolution: row.autoResolution,
     receivedAt: row.receivedAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

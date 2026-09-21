@@ -8,6 +8,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import {
+  TICKET_AUTO_RESOLUTIONS,
   TICKET_CATEGORIES,
   TICKET_CLASSIFICATIONS,
   TICKET_STATUSES,
@@ -29,6 +30,10 @@ export const ticketCategoryEnum = pgEnum("ticket_category", TICKET_CATEGORIES);
 export const ticketClassificationEnum = pgEnum(
   "ticket_classification",
   TICKET_CLASSIFICATIONS,
+);
+export const ticketAutoResolutionEnum = pgEnum(
+  "ticket_auto_resolution",
+  TICKET_AUTO_RESOLUTIONS,
 );
 
 export const ticket = pgTable(
@@ -90,6 +95,28 @@ export const ticket = pgTable(
      * queue is what would justify one.
      */
     classification: ticketClassificationEnum("classification")
+      .default("skipped")
+      .notNull(),
+
+    /**
+     * What the automatic resolver did with this row — see
+     * `TICKET_AUTO_RESOLUTIONS` for what each value means.
+     *
+     * The default is `skipped` for exactly the reason the column above's is:
+     * every ticket that existed before the assistant did gets it on migration,
+     * and `pending` would have marked the whole back catalogue as work queued
+     * against a resolver that is never going to run — a hundred rows the boot
+     * sweep would pick up and spend a model call on, and, worse, a hundred rows
+     * *missing from the queue*, since `handledBy=human` hides `pending`.
+     * Ingestion writes `pending` explicitly in the INSERT.
+     *
+     * **This column does carry an index, unlike `classification` beside it**,
+     * and the asymmetry is the policy this file states rather than an exception
+     * to it: an index is earned by a query that filters on the column, and this
+     * one is filtered on by *every* list request and again by the count beside
+     * it. `classification` is read and never filtered, so it still has none.
+     */
+    autoResolution: ticketAutoResolutionEnum("auto_resolution")
       .default("skipped")
       .notNull(),
 
@@ -170,6 +197,11 @@ export const ticket = pgTable(
     index("ticket_created_at_id_idx").on(table.createdAt, table.id),
     index("ticket_updated_at_id_idx").on(table.updatedAt, table.id),
     index("ticket_status_idx").on(table.status),
+    // Every list request filters on this and the count beside it does too —
+    // `handledBy` defaults to hiding the assistant's rows, so there is no
+    // request that skips the predicate. That is what earns the index here when
+    // `classification`, which is only ever read, still has none.
+    index("ticket_auto_resolution_idx").on(table.autoResolution),
     index("ticket_student_email_idx").on(table.studentEmail),
   ],
 );

@@ -64,6 +64,26 @@ const envSchema = z
     OPENROUTER_API_KEY: z.string().min(1).optional(),
 
     /**
+     * Where the support knowledge base lives — the document the automatic
+     * resolver answers students out of.
+     *
+     * A path rather than a database table, and that is the decision worth
+     * knowing. The knowledge base is written and argued over by the people who
+     * run the helpdesk, it changes on their schedule rather than the app's, and
+     * every word of it is policy someone has to be able to review — so it is a
+     * file in the repo, versioned in git, with a diff per change. A table would
+     * make "what did we tell students last Tuesday" unanswerable.
+     *
+     * Optional, and relative paths resolve from the API's own directory so the
+     * committed default works from any cwd. An install that points this at a
+     * file that is not there has no resolver at all — see
+     * `createTicketAutoResolver` — rather than one answering from nothing,
+     * which is the failure worth refusing: a model handed an empty knowledge
+     * base does not decline, it invents a refund policy.
+     */
+    KNOWLEDGE_BASE_PATH: z.string().trim().min(1).default("knowledge-base.md"),
+
+    /**
      * Which model runs — a comma-separated preference order, not one id, and
      * shared by all three features that call one.
      *

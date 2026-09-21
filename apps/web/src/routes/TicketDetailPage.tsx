@@ -90,7 +90,14 @@ export function TicketDetailPage() {
      * which every outcome does: a category, a decline, or a failure.
      */
     refetchInterval: (query) =>
-      query.state.data?.classification === "pending" ? 4_000 : false,
+      query.state.data?.classification === "pending" ||
+      // The assistant owes an answer on the same terms, and the page has told
+      // the reader to wait for it — so the banner above the email has to clear
+      // itself, and the thread has to gain the reply it announces. Both leave
+      // `pending`, whichever way it goes.
+      query.state.data?.autoResolution === "pending"
+        ? 4_000
+        : false,
   });
 
   const notFound =
@@ -203,6 +210,8 @@ function TicketView({ ticket }: { ticket: TicketDetail }) {
             Updated: {formatMoment(ticket.updatedAt)}
           </p>
         </header>
+
+        <AutoResolutionNote autoResolution={ticket.autoResolution} />
 
         <Card>
           <CardHeader>
@@ -434,6 +443,75 @@ function TicketControls({ ticket }: { ticket: TicketDetail }) {
       )}
     </aside>
   );
+}
+
+/**
+ * What the assistant did with this ticket, when it is worth a line.
+ *
+ * Above the email rather than in the sidebar, which is the opposite call to
+ * `ClassificationNote`'s, and for the reason the layout's own comment gives:
+ * the sidebar is decisions a human makes, and this is not one. It is a fact
+ * about the conversation the reader is about to read — and in the `resolved`
+ * case it is the fact that changes how they read it, because one of the replies
+ * below was not written by a colleague.
+ *
+ * Two of the five states say nothing. `skipped` is every ticket that predates
+ * the assistant and every ticket a human touched first, which is most of them.
+ * `escalated` is the ordinary outcome of a working assistant and means the
+ * ticket is exactly what it appears to be — an unanswered email — so a line
+ * saying so would appear on nearly every ticket and inform nobody.
+ *
+ * `resolved` is stated because the alternative is an agent reading a reply
+ * signed "Helpdesk Assistant" and having to work out from the signature what
+ * happened. `failed` is stated because it is the only place in the console that
+ * an agent learns the assistant is not reaching its model; the ticket is theirs
+ * either way, which is why the line says that rather than offering a retry.
+ * `pending` is stated because the page is about to change under them.
+ */
+function AutoResolutionNote({
+  autoResolution,
+}: {
+  autoResolution: TicketDetail["autoResolution"];
+}) {
+  if (autoResolution === "pending") {
+    return (
+      <Alert aria-live="polite">
+        <AlertTitle>The assistant is reading this ticket</AlertTitle>
+        <AlertDescription>
+          It will either answer from the knowledge base or hand the ticket back
+          to you. Give it a moment before you reply.
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
+  if (autoResolution === "resolved") {
+    return (
+      <Alert>
+        <AlertTitle>Answered automatically</AlertTitle>
+        <AlertDescription>
+          The assistant answered this from the support knowledge base and marked
+          it resolved. Its reply is in the thread below. Reopen the ticket if
+          the answer was wrong or did not cover what was asked.
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
+  if (autoResolution === "failed") {
+    return (
+      <Alert>
+        <AlertTitle>The assistant could not be reached</AlertTitle>
+        <AlertDescription>
+          Nothing was sent to the student and this ticket is yours to answer —
+          which is what would have happened anyway had the assistant read it and
+          declined.
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
+  return null;
 }
 
 /**

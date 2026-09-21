@@ -32,6 +32,7 @@ bun run email:send     # deliver a fixture email to the running API -> one ticke
 bun run seed:tickets   # load the 100-ticket corpus (needs `bun run dev:api` up)
                        # -- --reset      to clear the table first; idempotent otherwise
                        # -- --classify   let the AI classifier see them (off by default)
+                       # the auto-resolver never sees them, and has no opt-in flag
 bun run seed:replies   # put a 20-message conversation on one ticket
                        # -- --ticket=<uuid> [--agent=<email>] [--reset]
 bun run reset:password # set a staff password out of band (forgotten admin)
@@ -91,7 +92,7 @@ preload that registers happy-dom *and* puts Bun's native `fetch` back, or the
 | shadcn/ui on Radix | shadcn/ui on **Base UI** (`@base-ui/react`) |
 | React Router 7 | React Router 8 |
 
-The implementation plan's phase numbering is still the shared vocabulary — code comments reference "Phase 6" and "Phase 7" to mark deliberate placeholders. Current state is roughly Phase 0 complete, Phase 4 (auth) landed early, and the plain half of Phase 5 (email → ticket) landed after it: `db/schema.ts` re-exports the auth tables plus `ticket`, `GET /api/tickets` reads real rows, and there is no email *provider*. The automatic classifier is the one piece of background work, and it runs on **pg-boss** — a job queue inside the same Postgres, worked by the API process itself rather than by a separate worker deployment; see Classification below.
+The implementation plan's phase numbering is still the shared vocabulary — code comments reference "Phase 6" and "Phase 7" to mark deliberate placeholders. Current state is roughly Phase 0 complete, Phase 4 (auth) landed early, and the plain half of Phase 5 (email → ticket) landed after it: `db/schema.ts` re-exports the auth tables plus `ticket`, `GET /api/tickets` reads real rows, and there is no email *provider*. Two pieces of background work run off the back of ingestion — the automatic classifier and the automatic resolver — both on **pg-boss**, a job queue inside the same Postgres, worked by the API process itself rather than by a separate worker deployment; see Classification and Auto-resolution below.
 
 The domain vocabulary was cut down when ingestion landed, and `packages/shared/src/domain.ts` no longer matches project-scope.md: statuses are `open | resolved | closed` (no `new`, no `pending`) and categories are `general_questions | technical | refund_request`. The short category list is now load-bearing in a second way: it is the closed set the classifier picks from, and `classify-ticket.ts` builds its prompt out of `TICKET_CATEGORIES` so a fourth category is offered to the model in the same commit that makes the column able to hold it. `TICKET_PRIORITIES` and `ROUTING_QUEUES` are still there, consumed by nothing, as the shape a later phase grows into.
 
@@ -109,7 +110,7 @@ Consumed as **source**, not built — `main` points at `src/index.ts`. It holds 
 
 - `createAuth(db)` and `requireAuth(auth)` are **factories taking the handle**, not module-level singletons. Keep new db-dependent modules in that shape.
 - With no database there is no auth instance, so `requireAuth` answers 401 to everything rather than waving requests through.
-- `createApp({ auth })` accepts an injected auth instance purely as a test seam.
+- `createApp({ auth })` accepts an injected auth instance purely as a test seam; `createApp({ jobs })` is the same seam for the background queues, and how `index.ts` hands ingestion the instance it reconciles against.
 
 ### Middleware order in `app.ts` is load-bearing
 
@@ -141,7 +142,7 @@ Staff-only console: students never log in. Sessions live in the `session` table 
 
 ### Ingestion — email becomes a ticket
 
-`POST /api/inbound-email` is the whole of it. One delivered email becomes one `ticket` row, synchronously, and there is no broker to run beside Postgres. A classifier *does* run now, on a pg-boss job sent after the response — never inside the request. See Classification below. The `ticket_reply` table beside it holds the *outbound* half — see Replies below — and is not an inbound message table: a student's reply still opens a new ticket.
+`POST /api/inbound-email` is the whole of it. One delivered email becomes one `ticket` row, synchronously, and there is no broker to run beside Postgres. Two pg-boss jobs are sent after the response — never inside the request — one to classify the ticket and one to try to answer it from the knowledge base. See Classification and Auto-resolution below. The `ticket_reply` table beside it holds the *outbound* half — see Replies below — and is not an inbound message table: a student's reply still opens a new ticket.
 
 - **It is the API's only unauthenticated write, and necessarily so.** Whatever delivers the mail — a provider webhook, a forwarding script, `bun run email:send` — holds no session and never will. It is mounted at `/api` *above* `requireAuth` in `app.ts` for that reason, and `INBOUND_EMAIL_SECRET` presented as `x-inbound-secret` stands in for the session. That secret is optional in development (a local `curl` should not need a ceremony) and `env.ts` refuses to boot in production without one, exactly like `BETTER_AUTH_SECRET`. The comparison lives in the exported pure function `isAuthorizedSource` because `env` is parsed once at import — a test cannot configure a secret and then make a request against it, so the guard has to be reachable some other way, and an untested guard on the one open write is not worth having.
 - **`inboundEmailBodySchema` is the provider seam, not a provider payload.** It is the small intersection every provider can produce; a Mailgun or SES adapter's entire job becomes mapping its webhook onto this shape and posting it, so nothing downstream ever sees a provider-shaped object. It is `strictObject` for a sharper reason than the user writes: a plain `z.object` strips unknown keys, so an adapter that spelled the body `bodyText` would have the email's contents silently dropped and still be answered 201.
@@ -256,14 +257,31 @@ Things about the pg-boss setup that are load-bearing:
   there would be read as failure, retried three times, and dead-lettered into
   `failed` — over the top of their decision. The dead letter worker re-claims
   for the same reason.
-- **`start()`, `reconcile()` and `stop()` are called from `index.ts`, never
-  `createApp`.** Running a queue is a statement about being the server process;
-  starting pg-boss inside the factory would have every `createApp()` in the test
-  suite connect to a database, migrate a schema and register workers. Neither
-  start nor reconcile is awaited before `listen` — they would delay the port and
-  therefore a platform's health check — and a failure is logged, not fatal: the
-  API serves tickets, replies, users and auth perfectly well without a
-  classifier.
+- **There is one pg-boss instance per process, and `ticket-jobs.ts` owns it.**
+  It holds the connection, the error listener, `start()`, `reconcile()` and
+  `stop()`; each feature contributes only its own queues, workers and sends
+  through `register()`. That split arrived with the second background feature —
+  two instances against one database would each migrate the same `pgboss`
+  schema on boot and race each other doing it.
+- **The classifier and the resolver are separate queues, not two steps of one
+  job.** Different prompts, different failures, and — the part that settles it —
+  a retry policy cannot be shared: a classification that succeeded must not be
+  re-run because the resolver was throttled, and a resolver that has not run
+  must not be skipped because the classifier gave up. They run concurrently on a
+  ticket, safely, because they write different columns and neither reads the
+  other's.
+- **`createTicketJobs()`, `start()`, `reconcile()` and `stop()` are called from
+  `index.ts`, never `createApp`.** Running a queue is a statement about being
+  the server process; starting pg-boss inside the factory would have every
+  `createApp()` in the test suite connect to a database, migrate a schema and
+  register workers. Neither start nor reconcile is awaited before `listen` —
+  they would delay the port and therefore a platform's health check — and a
+  failure is logged, not fatal: the API serves tickets, replies, users and auth
+  perfectly well without either background feature. Note what that costs while
+  the queues are down, though: arriving tickets are marked `pending`, and
+  `handledBy=human` hides `pending`, so they are in the database and not in the
+  queue until `reconcile()` runs. That is what the boot sweep is for, and why it
+  runs on every start rather than only after an unclean one.
 - **`stop()` is ungraceful on purpose.** A model call is allowed sixty seconds
   and `index.ts` force-exits after ten, so waiting would just be waiting for the
   kill — and it is exactly what durability makes unnecessary: an abandoned job
@@ -298,6 +316,162 @@ Things about the ticket row that are load-bearing:
   `TicketListPage` every 5s while *the page being looked at* holds a pending row
   — gated on the visible page rather than any loaded page, because it is an
   infinite query and a refetch re-fetches every page walked so far.
+
+### Auto-resolution — the ticket answers itself, or reaches a human
+
+`apps/api/src/ai/auto-resolve-ticket.ts` (the prompt),
+`apps/api/src/ai/knowledge-base.ts` (the document), and
+`apps/api/src/ticket-auto-resolution.ts` (when it runs). One delivered email
+goes to a model together with `apps/api/knowledge-base.md`, and comes back
+either as a finished reply to the student — written, posted to the thread, and
+the ticket resolved — or as a refusal, which leaves an ordinary open ticket for
+a person. There is no button and no route: like classification, it is a
+consequence of ingestion, and it runs on the same pg-boss instance.
+
+**This is the highest-stakes thing in the repo.** The classifier's worst case is
+a refund request filed under Technical: visible, reversible, internal. This
+one's worst case is a confident, fluent, wrong email in a student's inbox with
+their ticket closed behind it. Everything below follows from that.
+
+- **The knowledge base is the only permitted source of fact, and its absence
+  turns the feature off.** `KNOWLEDGE_BASE_PATH` defaults to
+  `apps/api/knowledge-base.md`, resolved from the API package so the default
+  works from any cwd; no readable file means `createTicketAutoResolver()`
+  returns `undefined` and every ticket is marked `skipped`. That is not
+  defensive tidiness — a model handed an empty knowledge base and told to answer
+  from it does not decline, it invents a refund policy. It is a **file, not a
+  table**: it is policy, argued over by the people who run the helpdesk, and it
+  wants a diff per change. Read **once, at startup**, so editing it takes a
+  restart — two tickets ingested a second apart must not be answered from two
+  different refund policies.
+- **Whole, not retrieved.** No chunking, no embeddings, no similarity search. It
+  is a few thousand words, well inside any context window, and retrieval would
+  cost the property that makes it safe: section 10's escalation rules are not
+  *about* any particular question, so a search over a student's email would
+  routinely fail to retrieve them and the assistant would answer a chargeback
+  dispute because nothing told it not to. A knowledge base that outgrows the
+  context window is what makes retrieval worth its risks.
+- **Escalation is the default, stated as free.** The prompt tells the model that
+  handing back costs nothing and a wrong answer costs a real person, and lists
+  seven conditions that force it — anything the document does not clearly cover,
+  anything needing a fact about *this* student, anything that would decide or
+  promise something, and plain uncertainty. `INSTRUCTIONS` is pinned line by
+  line in `auto-resolve-ticket.test.ts` because these lines fail as an assistant
+  that works and occasionally ruins somebody's afternoon.
+- **"A refusal is an escalation, never a reply" is there because it shipped
+  without it.** On the first live run against an uncovered question — a Rust
+  course on the roadmap — the model invented nothing (the source-of-fact rule
+  held) and answered `REPLY` with "The knowledge base does not mention any plans
+  for a Rust course." That closed the student's ticket, told them nothing,
+  leaked that they were being answered out of a document, and stopped a
+  colleague ever seeing it: a correct observation turned into exactly what
+  escalation exists to prevent, and the worst of the three failure modes because
+  it looks like the feature working. The rules said "escalate when the knowledge
+  base does not answer it" and never said *not to write that sentence down*,
+  which a model with the source-of-fact rule strongly held satisfies by
+  reporting the gap. It is now said twice — a refusal must be delivered by
+  escalating, and the knowledge base is never mentioned to a student at all —
+  and both lines are pinned.
+- **`parseDecision` refuses rather than defaults.** The answer must lead with
+  `REPLY` or `ESCALATE` on its own first line. Anything else is `undefined` and
+  throws, and the tempting fix — treat an unrecognised answer as an escalation —
+  is wrong twice: it throws away the only signal the model has stopped following
+  instructions, and it makes a broken assistant indistinguishable from a
+  cautious one, so nobody ever finds out it stopped working. An over-length
+  reply is refused for the same reason it is not truncated: half an invented
+  policy still reads as a finished email.
+- **`ticket.auto_resolution` is the state, and it is not derivable from
+  `status`.** `resolved` means the same word whether a person closed the ticket
+  or the assistant answered it, and those are not the same event to anyone
+  auditing the queue. Hence `skipped | pending | resolved | escalated | failed`
+  — see `TICKET_AUTO_RESOLUTIONS`. `escalated` and `failed` are deliberately not
+  collapsed into `skipped`: all three put the ticket in front of a person, and a
+  reader who wants to know whether the assistant works at all cannot tell "it
+  declined, correctly" from "it was never asked" from "it broke" once they are
+  one value.
+- **The column defaults to `skipped` and is written `pending` in ingestion's
+  INSERT**, for the reason `classification` is — with one extra consequence that
+  is the whole of the next bullet.
+
+**The queue hides the assistant's tickets, and that is a filter with teeth.**
+`listTicketsQuerySchema.handledBy` defaults to **`human`**, which excludes
+`AI_HANDLED_AUTO_RESOLUTIONS` (`pending` and `resolved`). A ticket the assistant
+is reading is not work anybody should start — the two would answer one student
+twice, seconds apart — and a ticket it has answered is done.
+
+- **The default lives in the shared schema, not the route**, so the SPA, a
+  `curl` and the `total` count all inherit it. A default applied in the handler
+  is one the page counter can disagree with.
+- **`escalated` and `failed` are *not* hidden.** Those are the tickets the
+  assistant handed back, and handing back means appearing in the queue. Putting
+  either in the hidden set would be the worst possible reading of "don't show
+  tickets the AI is handling" — `packages/shared/src/api.test.ts` pins the set
+  for exactly that reason.
+- **A row left `pending` is a row missing from the queue**, which is the one
+  failure here that loses an email outright. Three things stand behind it, and
+  all three look redundant until you know this: the worker **writes** `skipped`
+  when it cannot claim a ticket rather than returning; the dead letter worker
+  always clears `pending`, either to `failed` or by standing down; and ingestion
+  puts the row back to `skipped` itself if the `enqueue` throws, rather than
+  waiting for `reconcile()` on the next boot. `PATCH /api/tickets/:id` writes
+  `autoResolution: "skipped"` alongside any change for the same reason —
+  otherwise a ticket an agent just assigned to themselves would vanish from the
+  queue they assigned it in.
+- **The SPA's `Showing` select is what takes the hidden rows back** — "Needs a
+  human" (default), "Handled by AI", "All" — in the URL as `?handled=`, like
+  every other piece of queue state. Without it those rows are filtered by a rule
+  with nothing on screen to explain it, which is not a hidden row but a lost
+  one. The empty state names the filter for the same reason: "no tickets match
+  that filter" beside three controls reading All is how a reader concludes the
+  queue is broken.
+- **The row marker is deliberately sparse.** `by AI` for `resolved` and
+  `AI unavailable` for `failed`; nothing for `skipped` or `escalated`. Escalated
+  is the *ordinary* outcome of a working assistant, so a badge on it would sit
+  on nearly every row and inform nobody — an escalated ticket is just a ticket,
+  which is what escalating means.
+
+Things about the worker that are load-bearing:
+
+- **It claims far more narrowly than the classifier does.** Still `pending`,
+  still `open`, still no replies on the thread, and still unassigned. The
+  classifier only asks whether a human set the category; this one asks whether a
+  human has touched the ticket *at all*, because writing to the student is wrong
+  the moment somebody else is on it. A colleague who has already replied is the
+  case worth naming: two different answers to one email, minutes apart.
+- **`resolve` is one transaction, and the guarded UPDATE goes first.** Its
+  `returning` is the arbiter — if the guard stopped matching while the model was
+  writing, the reply is not inserted. A reply with no status change is a ticket
+  that looks untouched; a status change with no reply is a student who was never
+  written to. `status: "resolved"` bypasses `canTransition`, which is safe only
+  because the claim pins the current status to `open`.
+- **`updatedAt` is restated in SQL on `escalate`, `fail` and `skip`**, and left
+  to `$onUpdate` on `resolve`. The first three happened to the *record* of a
+  ticket; the fourth is a reply and a status change, which is activity the
+  queue's default sort is supposed to surface. The idiom differs from the
+  classifier's (which carries the value through the job) because `skip` has no
+  claimed row to carry anything from.
+- **Every automatic reply is authored by a soft-deleted stand-in `user` row**,
+  `assistant.<SUPPORT_EMAIL>`, named `Helpdesk Assistant` — the same device
+  `dev/seed-replies.ts` uses for a student's turns, and for the same reason:
+  `ticket_reply.author_id` is NOT NULL and the thread's query inner-joins `user`
+  *without* filtering `deletedAt`. Soft-deleted is what makes it safe rather
+  than tidy: unlistable, unassignable, refused a session, and created with no
+  `account` row so there is no password to try. The address is namespaced for
+  the reason the student stand-in's is. `ASSISTANT_NAME` is the byline *and* the
+  sign-off the prompt is given, so a thread cannot disagree with itself.
+- **`x-skip-auto-resolve: 1` turns it off for one delivery**, a second header
+  beside `x-skip-classification` because they switch off different things — a
+  delivery that stated its own category still has a student waiting on an
+  answer. `dev/seed-tickets.ts` always sets it and has **no opt-in flag**,
+  unlike `--classify`: letting the assistant see a hundred committed fixtures
+  would write a hundred replies to addresses out of a fixture file and resolve a
+  hundred tickets, taking the corpus's status spread with them.
+- **Retries are the classifier's — three attempts, 15s base, ~3.5 minutes to
+  exhaust — and the ticket is invisible for all of it.** That is the deliberate
+  trade: the alternative is showing a ticket and then answering it out from
+  under whoever picked it up. `expireInSeconds` must clear the model's own 60s
+  deadline, or pg-boss reclaims a live job and runs it twice — **two emails to
+  one student**, rather than the duplicate model call it means next door.
 
 ### Ticket updates — status, category, assignee
 
@@ -486,26 +660,35 @@ member of staff said back.
 
 ### Where a model runs
 
-Three features, one core. `apps/api/src/ai/openrouter.ts` holds everything about
+Four features, one core. `apps/api/src/ai/openrouter.ts` holds everything about
 *reaching* a model — the fallback chain, the batching, the one shared deadline,
 the translation of a provider failure into a sentence an agent can act on — and
 exports `createTextGenerator()`, which is `undefined` when no key is configured.
 Each feature beside it owns only what makes it that feature: its instructions,
 its prompt, its temperature and its length ceiling. That split arrived with the
-summariser and held when the classifier landed as the third: everything about
-the provider lives in the core and is shared by all three. A fourth feature is
-a fourth prompt file, never a second copy of the batch walk — the trap in
-`OPENROUTER_MODELS_PER_REQUEST` below fails *every* request and reports itself
-as a generic call error, and a missed copy of it is a button that has never
-worked.
+summariser, held when the classifier landed as the third, and held again for the
+auto-resolver: everything about the provider lives in the core and is shared by
+all four. A fifth feature is a fifth prompt file, never a second copy of the
+batch walk — the trap in `OPENROUTER_MODELS_PER_REQUEST` below fails *every*
+request and reports itself as a generic call error, and a missed copy of it is a
+button that has never worked.
 
-The classifier is the one of the three with **no route and no reader**. The
-other two answer a button press, so a provider failure becomes a 502 with a
-sentence in it; this one runs off the back of ingestion and writes to a column,
-so its failures are a state on the row (`failed`) rather than a message, and its
-mistakes are a category that looks exactly like a correct one. That is why its
-prompt is the strictest of the three about declining, and why `parseAnswer`
-refuses anything that is not one of four exact words.
+Two of the four have **no route and no reader**. The polisher and the summariser
+answer a button press, so a provider failure becomes a 502 with a sentence in
+it; the classifier and the auto-resolver run off the back of ingestion and write
+to columns, so their failures are a state on the row (`failed`) rather than a
+message, and their mistakes look exactly like correct answers. That is why both
+of their prompts are stricter about declining than either button's, and why each
+has a parse that refuses anything not in an exact shape — `parseAnswer` one of
+four words, `parseDecision` one of two verdicts.
+
+The auto-resolver is the end of that scale and is worth understanding as its own
+category. Its output is not a column an agent reads and not a draft an agent
+approves: it is **an email sent to a student under the helpdesk's name, with
+their ticket closed behind it**. Nothing downstream checks it. Every decision in
+`ai/auto-resolve-ticket.ts` — the temperature, the ceiling, the refusal to
+salvage a malformed answer, the instruction that escalating is free — is made
+against that.
 
 ### Reply polishing
 
@@ -690,7 +873,7 @@ The queue lives at the index route, `/`, and the nav links to it with `end` — 
 
 The queue shows **one page of 10 at a time**, with Prev/Next and a "Page 3 of 10" counter — not the accumulating "Load more" it started as. `TICKET_PAGE_SIZE` in `packages/shared` is the single source of both the API's default `limit` and the divisor the SPA turns `total` into a page count with; two matching numbers would drift into a page count that is quietly wrong.
 
-**The queue's whole state lives in the URL** — `?status=`, `?category=`, `?q=`, `?sort=`/`?order=` and `?page=` (one-based), read back through the shared Zod schemas by `readQueueState` and written by `writeQueueState`, which omits anything still at its default so an untouched queue stays a bare `/`. It is there because opening a ticket *unmounts* `TicketListPage`: state in `useState` dies with it, so returning from a ticket used to land on page 1 of an unfiltered queue. In the query string it survives the round trip and a reload, the browser's Back button restores it for free, and a position in the queue becomes something an agent can paste. An unrecognised value falls back to the default rather than erroring, and every request is built from the *parsed* value, so `?status=pending` cannot reach the API.
+**The queue's whole state lives in the URL** — `?status=`, `?category=`, `?q=`, `?handled=`, `?sort=`/`?order=` and `?page=` (one-based), read back through the shared Zod schemas by `readQueueState` and written by `writeQueueState`, which omits anything still at its default so an untouched queue stays a bare `/`. `?handled=` is the one whose default is not "everything": it is `human`, matching the API's own default, which is what keeps a bare `/` and a bare `GET /api/tickets` the same queue — see Auto-resolution. It is there because opening a ticket *unmounts* `TicketListPage`: state in `useState` dies with it, so returning from a ticket used to land on page 1 of an unfiltered queue. In the query string it survives the round trip and a reload, the browser's Back button restores it for free, and a position in the queue becomes something an agent can paste. An unrecognised value falls back to the default rather than erroring, and every request is built from the *parsed* value, so `?status=pending` cannot reach the API.
 
 Three consequences. A page index restored from the URL may name a page nothing has fetched — cursor pagination cannot jump, so an effect **walks `fetchNextPage` forward one request at a time**, and clamps (with `replace`) when the cursors run out, so `?page=99` shows the end of the queue rather than an empty table. Clamping on `pageCount` instead would pick the same destination earlier and save no request, since reaching the last page still means walking to it. The detail page's own "Back to tickets" is a fresh navigation to `/`, so the subject link carries the queue's address in `state.from` and `BackToQueue` reads it back (validated as a path, since history state survives a reload).
 

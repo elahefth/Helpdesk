@@ -126,6 +126,7 @@ function ticket(overrides: Partial<TicketDetail> = {}): TicketDetail {
     status: "open",
     category: "technical",
     classification: "skipped",
+    autoResolution: "skipped",
     body: "Hi,\n\nThe portal rejects my password.\n\nThanks,\nAda",
     supportEmail: "support@example.edu",
     receivedAt: "2026-08-20T09:15:00.000Z",

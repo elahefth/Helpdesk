@@ -70,6 +70,7 @@ function ticketRow(overrides: Partial<TicketSummary> = {}): TicketSummary {
     status: "open",
     category: null,
     classification: "skipped",
+    autoResolution: "skipped",
     receivedAt: "2026-08-20T09:15:00.000Z",
     createdAt: "2026-08-20T09:15:01.000Z",
     updatedAt: "2026-08-20T09:15:01.000Z",
@@ -325,6 +326,124 @@ describe("TicketListPage", () => {
     await waitFor(() => {
       expect(requestedUrls).toContain("/api/tickets?category=refund_request");
     });
+  });
+
+  /**
+   * The queue hides the tickets the assistant is handling, and the request it
+   * sends for that is *no parameter at all* — the API defaults to `human` too.
+   * Sending `handledBy=human` explicitly would work and would make the common
+   * URL carry a redundant pair; more to the point, a test that accepted either
+   * would not notice the day the two defaults drift apart.
+   */
+  it("leaves the assistant's tickets out without saying so in the query", async () => {
+    responders.push(jsonResponse(pageOf([ticketRow()])));
+
+    renderList();
+    await screen.findByText("Cannot log in to the course portal");
+
+    expect(requestedUrls[0]).toBe("/api/tickets");
+  });
+
+  // The control that takes the hidden rows back. Without it they are filtered
+  // by a rule with nothing on screen to explain it, which is a lost row rather
+  // than a hidden one.
+  it("asks for the assistant's tickets when Showing changes", async () => {
+    responders.push(jsonResponse(pageOf([ticketRow()])));
+    renderList();
+    await screen.findByText("Cannot log in to the course portal");
+
+    responders.push(
+      jsonResponse(pageOf([ticketRow({ autoResolution: "resolved" })])),
+    );
+    await userEvent.click(screen.getByRole("combobox", { name: /showing/i }));
+    await userEvent.click(
+      await screen.findByRole("option", { name: "Handled by AI" }),
+    );
+
+    await waitFor(() => {
+      expect(requestedUrls).toContain("/api/tickets?handledBy=ai");
+    });
+  });
+
+  /**
+   * Under `Handled by AI` the marker is the reason the row is there. In the
+   * default queue it never appears, because a resolved-by-AI ticket is hidden
+   * — which is the feature.
+   */
+  it("marks a ticket the assistant answered", async () => {
+    responders.push(
+      jsonResponse(pageOf([ticketRow({ autoResolution: "resolved" })])),
+    );
+
+    renderList("/?handled=ai");
+
+    const row = await screen.findByRole("row", { name: /Cannot log in/ });
+    expect(within(row).getByText("by AI")).toBeDefined();
+  });
+
+  /**
+   * `escalated` is the ordinary outcome of a working assistant, so a badge on
+   * it would sit on nearly every row of the default queue and inform nobody. An
+   * escalated ticket is just a ticket, which is what escalating means.
+   */
+  it("says nothing about a ticket the assistant handed back", async () => {
+    responders.push(
+      jsonResponse(pageOf([ticketRow({ autoResolution: "escalated" })])),
+    );
+
+    renderList();
+
+    const row = await screen.findByRole("row", { name: /Cannot log in/ });
+    expect(within(row).queryByText("by AI")).toBeNull();
+    expect(within(row).queryByText("AI unavailable")).toBeNull();
+  });
+
+  /**
+   * The only place in the console an agent learns the assistant is not reaching
+   * its model. The ticket is theirs either way — which is the point — but a run
+   * of these is a configuration problem nothing else would mention.
+   */
+  it("says so when the assistant could not be reached", async () => {
+    responders.push(
+      jsonResponse(pageOf([ticketRow({ autoResolution: "failed" })])),
+    );
+
+    renderList();
+
+    const row = await screen.findByRole("row", { name: /Cannot log in/ });
+    expect(within(row).getByText("AI unavailable")).toBeDefined();
+  });
+
+  /**
+   * An empty default queue has a cause no control on screen is set to, so
+   * "no tickets match that filter" next to three filters reading All is how a
+   * reader concludes the queue is broken.
+   */
+  it("points at Showing when the default queue is empty", async () => {
+    responders.push(jsonResponse(pageOf([])));
+
+    renderList();
+
+    expect(
+      await screen.findByText(/Tickets the assistant is answering are hidden/),
+    ).toBeDefined();
+  });
+
+  /**
+   * And the opposite: with the filter off, nothing is being hidden, so telling
+   * the reader something is would send them to a control that will not help.
+   */
+  it("does not blame the assistant for an empty queue showing everything", async () => {
+    responders.push(jsonResponse(pageOf([])));
+
+    renderList("/?handled=all");
+
+    expect(
+      await screen.findByText("No tickets match that filter"),
+    ).toBeDefined();
+    expect(
+      screen.queryByText(/Tickets the assistant is answering are hidden/),
+    ).toBeNull();
   });
 
   it("surfaces a failed list rather than showing an empty queue", async () => {

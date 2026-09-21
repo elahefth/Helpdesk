@@ -2,16 +2,16 @@ import { createApp } from "./app.ts";
 import { env } from "./env.ts";
 import { logger } from "./logger.ts";
 import { closeDb, getDb } from "./db/client.ts";
-import { createTicketClassification } from "./ticket-classification.ts";
+import { createTicketJobs } from "./ticket-jobs.ts";
 
 /**
- * Built here rather than left to `createApp` so this process can also call
- * `resume()` on it below — the app needs somewhere to hand new tickets, and the
- * process needs to own the backlog, and those have to be the same queue.
+ * Built here rather than left to `createApp` so this process can also start and
+ * reconcile it below — the app needs somewhere to hand new tickets, and the
+ * process needs to own the backlog, and those have to be the same queues.
  */
-const classification = createTicketClassification(getDb());
+const jobs = createTicketJobs(getDb());
 
-const app = createApp({ classification });
+const app = createApp({ jobs });
 
 const server = app.listen(env.PORT, () => {
   logger.info(
@@ -19,14 +19,15 @@ const server = app.listen(env.PORT, () => {
       port: env.PORT,
       env: env.NODE_ENV,
       database: Boolean(env.DATABASE_URL),
-      classification: Boolean(classification),
+      classification: Boolean(jobs?.classification),
+      autoResolution: Boolean(jobs?.autoResolution),
     },
     "api listening",
   );
 });
 
 /**
- * Bring the classification queue up, then put it back in agreement with the
+ * Bring the background job queues up, then put them back in agreement with the
  * ticket table.
  *
  * Both halves live in `index.ts` and not in `createApp` on purpose. `createApp`
@@ -43,19 +44,20 @@ const server = app.listen(env.PORT, () => {
  * that this very call is about to pick up.
  *
  * A failure is logged and dropped rather than crashing the process. The API
- * serves tickets, replies, users and auth without a classifier; refusing to
- * boot because a background queue could not start would take all of that down
- * with it.
+ * serves tickets, replies, users and auth without a classifier or an assistant;
+ * refusing to boot because a background queue could not start would take all of
+ * that down with it. Note what that costs while the queues are down: every
+ * arriving ticket is marked `pending` and `handledBy=human` hides `pending`, so
+ * the tickets are in the database and not in the queue until `reconcile()`
+ * runs. That is the case the boot sweep exists for, and the reason it runs on
+ * every start rather than only after an unclean one.
  */
 void (async () => {
-  if (!classification) return;
-  await classification.start();
-  const count = await classification.reconcile();
-  if (count > 0) {
-    logger.info({ count }, "re-queued tickets still awaiting classification");
-  }
+  if (!jobs) return;
+  await jobs.start();
+  await jobs.reconcile();
 })().catch((err: unknown) => {
-  logger.error({ err }, "could not start the classification queue");
+  logger.error({ err }, "could not start the ticket job queues");
 });
 
 /**
@@ -70,10 +72,10 @@ async function shutdown(signal: string): Promise<void> {
     // stop cleanly must not keep the process from closing its database handle.
     // Anything in flight is abandoned rather than waited for — the job returns
     // to `created` when it expires and runs again wherever the next process is.
-    await classification
+    await jobs
       ?.stop()
       .catch((error: unknown) =>
-        logger.error({ err: error }, "error stopping the classification queue"),
+        logger.error({ err: error }, "error stopping the ticket job queues"),
       );
     await closeDb();
     process.exit(err ? 1 : 0);

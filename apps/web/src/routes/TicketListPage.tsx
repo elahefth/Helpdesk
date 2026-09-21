@@ -14,12 +14,16 @@ import {
 import {
   CATEGORY_LABELS,
   TICKET_CATEGORIES,
+  TICKET_HANDLER_LABELS,
+  TICKET_HANDLERS,
   TICKET_PAGE_SIZE,
   TICKET_STATUSES,
   ticketCategorySchema,
+  ticketHandlerSchema,
   ticketSortKeySchema,
   ticketStatusSchema,
   type TicketCategory,
+  type TicketHandler,
   type TicketSortKey,
   type TicketStatus,
   type TicketSummary,
@@ -56,6 +60,17 @@ const CATEGORY_ITEMS = [
   })),
 ];
 
+/**
+ * No "All" entry of its own: `all` is one of the three handlers, so the option
+ * is already in the list and adding another would be two controls for one
+ * value. It is also the only one of the three filters whose default is not
+ * "everything" — see `DEFAULT_QUEUE`.
+ */
+const HANDLER_ITEMS = TICKET_HANDLERS.map((value) => ({
+  label: TICKET_HANDLER_LABELS[value],
+  value,
+}));
+
 /** Same shape the users table uses for `createdAt` — a date, not a timestamp. */
 const formatCreated = (iso: string) => new Date(iso).toLocaleDateString();
 
@@ -81,6 +96,11 @@ type QueueState = {
   search: string;
   sortKey: TicketSortKey;
   sortOrder: "asc" | "desc";
+  /**
+   * Which tickets the queue is asking about. Unlike the two filters above, its
+   * default is not "everything" — see `DEFAULT_QUEUE`.
+   */
+  handledBy: TicketHandler;
   /** Zero-based here, one-based in the URL — `?page=1` is the first page. */
   pageIndex: number;
 };
@@ -91,6 +111,13 @@ const DEFAULT_QUEUE: QueueState = {
   search: "",
   sortKey: "createdAt",
   sortOrder: "desc",
+  /**
+   * The one filter that starts by hiding something, and the whole point of it:
+   * a ticket the assistant is reading, or has already answered and closed, is
+   * not work anybody should pick up. It matches the API's own default, which is
+   * what keeps a bare `/` and a bare `GET /api/tickets` the same queue.
+   */
+  handledBy: "human",
   pageIndex: 0,
 };
 
@@ -112,6 +139,9 @@ function readQueueState(params: URLSearchParams): QueueState {
       ticketSortKeySchema.safeParse(params.get("sort")).data ??
       DEFAULT_QUEUE.sortKey,
     sortOrder: params.get("order") === "asc" ? "asc" : "desc",
+    handledBy:
+      ticketHandlerSchema.safeParse(params.get("handled")).data ??
+      DEFAULT_QUEUE.handledBy,
     pageIndex: Number.isInteger(page) && page > 1 ? page - 1 : 0,
   };
 }
@@ -129,6 +159,9 @@ function writeQueueState(state: QueueState): URLSearchParams {
     params.set("sort", state.sortKey);
   if (state.sortOrder !== DEFAULT_QUEUE.sortOrder) {
     params.set("order", state.sortOrder);
+  }
+  if (state.handledBy !== DEFAULT_QUEUE.handledBy) {
+    params.set("handled", state.handledBy);
   }
   if (state.pageIndex > 0) params.set("page", String(state.pageIndex + 1));
   return params;
@@ -193,9 +226,14 @@ const columns: ColumnDef<typeof features, TicketSummary, unknown>[] = [
     id: "status" satisfies TicketSortKey,
     header: "Status",
     cell: ({ row }) => (
-      <Badge variant={row.original.status === "open" ? "default" : "secondary"}>
-        {row.original.status}
-      </Badge>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Badge
+          variant={row.original.status === "open" ? "default" : "secondary"}
+        >
+          {row.original.status}
+        </Badge>
+        <AutoResolution ticket={row.original} />
+      </div>
     ),
   }),
   columnHelper.accessor((row): unknown => row.category ?? "", {
@@ -251,7 +289,8 @@ const columns: ColumnDef<typeof features, TicketSummary, unknown>[] = [
 export function TicketListPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const queue = useMemo(() => readQueueState(searchParams), [searchParams]);
-  const { status, category, search, sortKey, sortOrder, pageIndex } = queue;
+  const { status, category, search, sortKey, sortOrder, handledBy, pageIndex } =
+    queue;
 
   /**
    * Every control that changes the ordering or the set of rows also sends the
@@ -287,6 +326,14 @@ export function TicketListPage() {
 
   const handleCategoryChange = (value: TicketCategory | "all" | null) => {
     applyFilters({ category: value ?? "all" });
+  };
+
+  // Cleared back to the default rather than to "all", unlike the two above: the
+  // neutral value here is a deliberate choice among three, not the absence of a
+  // filter, and falling back to "all" would quietly un-hide the assistant's
+  // tickets for anyone whose Select got into a null state.
+  const handleHandlerChange = (value: TicketHandler | null) => {
+    applyFilters({ handledBy: value ?? DEFAULT_QUEUE.handledBy });
   };
 
   /**
@@ -356,12 +403,19 @@ export function TicketListPage() {
     fetchNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ["tickets", { status, category, search, sortKey, sortOrder }],
+    queryKey: [
+      "tickets",
+      { status, category, search, sortKey, sortOrder, handledBy },
+    ],
     queryFn: ({ pageParam }) =>
       listTickets({
         ...(status === "all" ? {} : { status }),
         ...(category === "all" ? {} : { category }),
         ...(search ? { q: search } : {}),
+        // Omitted at its default like the sort below, so the common request
+        // stays `/api/tickets` — the server defaults to `human` too, and the
+        // two defaults are one decision written in `listTicketsQuerySchema`.
+        ...(handledBy === DEFAULT_QUEUE.handledBy ? {} : { handledBy }),
         // Omitted when they match the server's own defaults, so the common
         // request stays `/api/tickets` rather than carrying a redundant pair.
         ...(sortKey === "createdAt" && sortOrder === "desc"
@@ -392,7 +446,14 @@ export function TicketListPage() {
      */
     refetchInterval: (query) =>
       query.state.data?.pages[pageIndex]?.data.some(
-        (row) => row.classification === "pending",
+        (row) =>
+          row.classification === "pending" ||
+          // The assistant's turn ends the same way: a row under `Handled by AI`
+          // that reads "answering…" becomes an answered, resolved ticket a few
+          // seconds later, with nothing to fetch it. Only reachable in the `ai`
+          // and `all` views — `human` hides every pending row by definition —
+          // so this costs the default queue nothing.
+          row.autoResolution === "pending",
       )
         ? 5_000
         : false,
@@ -611,6 +672,36 @@ export function TicketListPage() {
             </SelectGroup>
           </SelectContent>
         </Select>
+
+        {/*
+          The queue hides the tickets the assistant is handling, and this is the
+          control that says so and takes it back. Without it those rows would be
+          filtered by a rule with nothing on screen to explain it — which is not
+          a hidden row, it is a lost one, and "the assistant wrote to a student
+          and I cannot see what it said" is the failure this feature would
+          otherwise ship with.
+        */}
+        <Label htmlFor="handled" className="ml-4 text-muted-foreground">
+          Showing
+        </Label>
+        <Select
+          items={HANDLER_ITEMS}
+          value={handledBy}
+          onValueChange={handleHandlerChange}
+        >
+          <SelectTrigger id="handled" className="min-w-40">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {HANDLER_ITEMS.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
       </div>
 
       {isPageLoading && <TicketsTableSkeleton table={table} />}
@@ -633,11 +724,30 @@ export function TicketListPage() {
             <p className="font-medium">
               {search
                 ? `No tickets match “${search}”`
-                : "No tickets match that filter"}
+                : handledBy === "ai"
+                  ? "The assistant has not handled any tickets"
+                  : "No tickets match that filter"}
             </p>
+            {/*
+              The default queue hides rows, so an empty one has a second
+              possible cause that no control on screen is set to — and a reader
+              told "no tickets match that filter" while every filter reads
+              "All" is a reader who concludes the queue is broken. Saying which
+              rows are missing, and that Showing is where they are, is the whole
+              reason the wording branches.
+            */}
             <p className="mt-1 text-sm text-muted-foreground">
               {search ? (
                 "Searches cover the subject, the sender and the message body."
+              ) : handledBy === "ai" ? (
+                "Tickets appear here once the assistant answers one from the knowledge base."
+              ) : handledBy === "human" ? (
+                <>
+                  Tickets the assistant is answering are hidden — switch{" "}
+                  <strong className="font-medium">Showing</strong> to see them.
+                  New ones appear when email arrives at the support address;
+                  deliver one with <code>bun run email:send</code>.
+                </>
               ) : (
                 <>
                   Tickets appear here when email arrives at the support address.
@@ -740,6 +850,57 @@ function SubjectCell({ ticket }: { ticket: TicketSummary }) {
       {ticket.subject}
     </Link>
   );
+}
+
+/**
+ * What the assistant did with this ticket, when it is worth saying.
+ *
+ * Three of the five states render nothing, and which three is the whole
+ * judgement here. `skipped` is most of the table in an install that has no
+ * assistant, and all of the back catalogue in one that does. `escalated` is the
+ * *ordinary* outcome in a working install — the knowledge base answers a
+ * minority of mail — so a badge on it would sit on nearly every row of the
+ * default queue and say nothing, which is how a badge stops being read at all.
+ * An escalated ticket is just a ticket, which is exactly what escalating means.
+ *
+ * What is left is the exceptional pair. `resolved` only appears under
+ * `Handled by AI`, where it is the reason the row is there and the thing the
+ * reader is auditing. `failed` appears in the default queue, where it is the
+ * only sign an agent gets that the assistant is not working — the ticket
+ * reaches them either way, which is the point, but a run of these is a
+ * configuration problem and nothing else in the console would ever mention it.
+ *
+ * `pending` says "answering…" rather than a badge, matching the "classifying…"
+ * the category column uses for the same situation: a state that is about to
+ * stop being true on its own, which the poll on the query is what makes so.
+ */
+function AutoResolution({ ticket }: { ticket: TicketSummary }) {
+  switch (ticket.autoResolution) {
+    case "pending":
+      return (
+        <span className="text-xs text-muted-foreground" aria-live="polite">
+          answering…
+        </span>
+      );
+    case "resolved":
+      return (
+        <Badge variant="outline" title="Answered from the knowledge base">
+          by AI
+        </Badge>
+      );
+    case "failed":
+      return (
+        <Badge
+          variant="outline"
+          className="text-muted-foreground"
+          title="The assistant could not be reached — this ticket is yours"
+        >
+          AI unavailable
+        </Badge>
+      );
+    default:
+      return null;
+  }
 }
 
 /**

@@ -1,7 +1,9 @@
 import { z } from "zod";
 import {
+  ticketAutoResolutionSchema,
   ticketCategorySchema,
   ticketClassificationSchema,
+  ticketHandlerSchema,
   ticketStatusSchema,
   userRoleSchema,
 } from "./domain.ts";
@@ -94,6 +96,19 @@ export const ticketSummarySchema = z.object({
    * "nobody is going to classify this".
    */
   classification: ticketClassificationSchema,
+  /**
+   * What the automatic resolver did with this ticket — see
+   * `TICKET_AUTO_RESOLUTIONS`.
+   *
+   * On the summary for the reason `classification` is, and then for one more:
+   * the queue *filters* on it. `handledBy` hides the rows the assistant owns,
+   * so a row that made it onto the page has already passed that test — and the
+   * field is what lets the page say which of the remaining ones the assistant
+   * looked at and handed back. Without it an escalated ticket and a ticket
+   * nobody ever asked about are the same row, which is the distinction
+   * `TICKET_AUTO_RESOLUTIONS` exists to keep.
+   */
+  autoResolution: ticketAutoResolutionSchema,
   receivedAt: z.string().datetime(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -172,6 +187,22 @@ export type TicketSortKey = z.infer<typeof ticketSortKeySchema>;
 export const listTicketsQuerySchema = z.object({
   status: ticketStatusSchema.optional(),
   category: ticketCategorySchema.optional(),
+  /**
+   * Which tickets the queue is being asked about — and the one filter here with
+   * a non-neutral default.
+   *
+   * `human` excludes the tickets the assistant is answering or has answered, so
+   * a bare `GET /api/tickets` is the work a person still has to do. That is the
+   * point of auto-resolution: a ticket the machine is handling must not sit in
+   * someone's queue, and a reader who has to remember to filter it out is a
+   * reader who occasionally answers a student twice.
+   *
+   * Defaulted in the schema rather than applied in the route, so every caller
+   * gets it: the SPA, a `curl`, and the count query that produces the page
+   * numbers. A default that lived in the handler would be one the response's
+   * `total` could disagree with.
+   */
+  handledBy: ticketHandlerSchema.default("human"),
   /**
    * Free-text search across the subject, the sender and the email body.
    *

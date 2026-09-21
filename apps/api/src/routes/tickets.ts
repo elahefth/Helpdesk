@@ -1,6 +1,18 @@
 import { Router } from "express";
-import { and, asc, count, eq, ilike, isNull, or, type SQL } from "drizzle-orm";
 import {
+  and,
+  asc,
+  count,
+  eq,
+  ilike,
+  inArray,
+  isNull,
+  notInArray,
+  or,
+  type SQL,
+} from "drizzle-orm";
+import {
+  AI_HANDLED_AUTO_RESOLUTIONS,
   canTransition,
   createTicketReplyBodySchema,
   listTicketsQuerySchema,
@@ -13,6 +25,7 @@ import {
   type PolishTicketReplyResponse,
   type SummarizeTicketResponse,
   type TicketDetail,
+  type TicketHandler,
   type TicketReply,
   type UpdateTicketResponse,
 } from "@helpdesk/shared";
@@ -87,6 +100,38 @@ function matchesSearch(term: string): SQL | undefined {
     ilike(ticket.studentEmail, pattern),
     ilike(ticket.body, pattern),
   );
+}
+
+/**
+ * The `handledBy` predicate — the one filter on this route whose default hides
+ * rows.
+ *
+ * `human` is that default, and it is the whole of "do not show tickets the
+ * assistant is handling": a ticket it is reading or has already answered is not
+ * work anybody should pick up, and a queue that lists one invites a second
+ * answer to a student who has had one. `escalated` and `failed` are
+ * deliberately *not* in `AI_HANDLED_AUTO_RESOLUTIONS` — those are the tickets
+ * the assistant handed back, and handing back means appearing in the queue.
+ *
+ * `undefined` for `all`, so it composes into `and(...)` as no predicate rather
+ * than as a tautology the planner has to see through.
+ *
+ * Spread rather than passed as the `readonly` tuple it is: drizzle's `inArray`
+ * takes a mutable array, and the copy is two strings.
+ *
+ * Built from the shared constant rather than spelled out here, because the
+ * SPA's empty state explains which rows are missing and the two have to agree.
+ * A list that hides one set while the page explains another is worse than
+ * either on its own.
+ */
+function matchesHandler(handler: TicketHandler): SQL | undefined {
+  if (handler === "all") return undefined;
+
+  const handled = [...AI_HANDLED_AUTO_RESOLUTIONS];
+
+  return handler === "ai"
+    ? inArray(ticket.autoResolution, handled)
+    : notInArray(ticket.autoResolution, handled);
 }
 
 /**
@@ -197,6 +242,11 @@ export function createTicketsRouter(
       // and not beside the cursor: the count has to see it, or the pager
       // reports the size of a queue the reader is not looking at.
       query.q ? matchesSearch(query.q) : undefined,
+      // In `filters` and not beside the cursor, like every other narrowing
+      // here: the count has to see it, or the pager reports the size of a queue
+      // nobody is looking at — and this one narrows every request, including
+      // the ones that name no filter at all.
+      matchesHandler(query.handledBy),
     );
 
     const rows = await db
@@ -360,7 +410,33 @@ export function createTicketsRouter(
     // move the ticket to the top of the queue's default sort — a PATCH that
     // changed nothing must not reorder the queue.
     if (Object.keys(changes).length > 0) {
-      await db.update(ticket).set(changes).where(eq(ticket.id, id.data));
+      await db
+        .update(ticket)
+        .set({
+          ...changes,
+          /**
+           * A human touched this ticket, so the assistant does not get to
+           * answer it. Written alongside *any* change rather than only a status
+           * one, because every field here says the same thing: somebody has
+           * taken this.
+           *
+           * It is the other half of the guard in
+           * `ticket-auto-resolution.ts`'s `claim`, and the halves fail
+           * differently. That one stops a job already in flight from writing
+           * over this decision; this one stops the ticket sitting on `pending`
+           * afterwards — which matters because `pending` is precisely what
+           * `handledBy=human` hides, so a ticket an agent just assigned to
+           * themselves would vanish from the queue they assigned it in. It is
+           * the same statement `classification: "skipped"` makes above, and it
+           * covers the same failure.
+           *
+           * Unconditional rather than guarded on the current value: writing
+           * `skipped` over `skipped` changes nothing, and a read-modify-write
+           * to avoid it would be a round trip bought to save a no-op.
+           */
+          autoResolution: "skipped" as const,
+        })
+        .where(eq(ticket.id, id.data));
     }
 
     // Read back rather than returning the updated row: the response names the

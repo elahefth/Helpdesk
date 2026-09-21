@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import { AI_HANDLED_AUTO_RESOLUTIONS } from "./domain.ts";
 import {
   createUserBodySchema,
   inboundEmailBodySchema,
+  listTicketsQuerySchema,
   updateUserBodySchema,
 } from "./api.ts";
 
@@ -207,5 +209,60 @@ describe("inboundEmailBodySchema", () => {
       category: "refund_request",
     });
     expect(parsed.category).toBe("refund_request");
+  });
+});
+
+/**
+ * The one query parameter on the ticket list whose default hides rows, and the
+ * only place that decision is written down.
+ *
+ * It lives in the schema rather than in the route so that every caller inherits
+ * it — the SPA, a `curl`, and the count query that produces the page numbers.
+ * A default applied in the handler would be one the response's `total` could
+ * disagree with, which is a page counter that lies.
+ *
+ * Pinned here because the failure is silent in the direction that matters: a
+ * default that drifted to `all` would put every ticket the assistant is
+ * midway through answering back into the queue, where an agent answers the
+ * student a second time. Nothing on screen would look wrong.
+ */
+describe("listTicketsQuerySchema handledBy", () => {
+  it("hides the assistant's tickets unless asked otherwise", () => {
+    expect(listTicketsQuerySchema.parse({}).handledBy).toBe("human");
+  });
+
+  it("takes the other two handlers as given", () => {
+    expect(listTicketsQuerySchema.parse({ handledBy: "ai" }).handledBy).toBe(
+      "ai",
+    );
+    expect(listTicketsQuerySchema.parse({ handledBy: "all" }).handledBy).toBe(
+      "all",
+    );
+  });
+
+  /**
+   * A handler the domain does not have is a 400 rather than a silent fall back
+   * to the default — the same treatment `status` gets. The SPA does fall back,
+   * deliberately, but it does so by parsing the URL itself; what reaches the
+   * API is always one of the three.
+   */
+  /**
+   * Which states count as the assistant's, and the two that deliberately do
+   * not. `escalated` and `failed` both mean the assistant is finished and a
+   * human has the ticket — putting either in this list would hide from the
+   * queue exactly the tickets that were handed to it, which is the worst
+   * possible reading of "don't show tickets the AI is handling".
+   */
+  it("counts only in-flight and answered tickets as the assistant's", () => {
+    expect([...AI_HANDLED_AUTO_RESOLUTIONS].sort()).toEqual([
+      "pending",
+      "resolved",
+    ]);
+  });
+
+  it("refuses a handler that is not one of the three", () => {
+    expect(
+      listTicketsQuerySchema.safeParse({ handledBy: "robot" }).success,
+    ).toBe(false);
   });
 });

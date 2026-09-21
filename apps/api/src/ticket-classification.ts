@@ -1,7 +1,7 @@
 import { and, asc, eq, isNull } from "drizzle-orm";
 import {
-  PgBoss,
   type Job,
+  type PgBoss,
   type Queue,
   type SendOptions,
   type WorkOptions,
@@ -14,7 +14,6 @@ import {
 } from "./ai/classify-ticket.ts";
 import type { Database } from "./db/client.ts";
 import { ticket } from "./db/schema.ts";
-import { env } from "./env.ts";
 import { logger } from "./logger.ts";
 
 /**
@@ -344,10 +343,12 @@ export function createClassificationWorker(
 
 export interface ClassificationQueue {
   /**
-   * Connect, migrate pg-boss's schema, declare the queues and start the
-   * workers. Called once, from `index.ts`.
+   * Declare this feature's queues and start its workers on an already-running
+   * pg-boss instance. Called once, by `ticket-jobs.ts`, which owns the
+   * connection and the `start()`/`stop()` that go with it — there is one boss
+   * per process and more than one feature riding on it.
    */
-  start(): Promise<void>;
+  register(): Promise<void>;
   /**
    * Hand a ticket over. Durable the moment it resolves — the job is a row in
    * Postgres, so it outlives this process.
@@ -374,8 +375,6 @@ export interface ClassificationQueue {
    * answers `null` rather than queueing a second.
    */
   reconcile(): Promise<number>;
-  /** Stop the workers and close the pool. */
-  stop(): Promise<void>;
 }
 
 /**
@@ -418,15 +417,7 @@ export function createClassificationQueue(
   return {
     enqueue,
 
-    async start() {
-      // Required: pg-boss emits maintenance and connection failures here, and
-      // an EventEmitter with no `error` listener throws on the process.
-      boss.on("error", (error) => {
-        logger.error({ err: error }, "pg-boss error");
-      });
-
-      await boss.start();
-
+    async register() {
       // The dead letter queue has to exist before the queue that names it, or
       // `createQueue` refuses the reference.
       await boss.createQueue(DEAD_LETTER_QUEUE);
@@ -458,52 +449,33 @@ export function createClassificationQueue(
       for (const id of ids) await enqueue(id);
       return ids.length;
     },
-
-    async stop() {
-      // Ungraceful on purpose. A model call is allowed sixty seconds and
-      // `index.ts` force-exits after ten, so waiting for in-flight work would
-      // just be waiting for the kill — and it is precisely what the durable
-      // queue makes unnecessary: an abandoned job goes back to `created` when
-      // `expireInSeconds` lapses and runs again on whichever process is up.
-      await boss.stop({ graceful: false });
-    },
   };
 }
 
 /**
  * The wiring, in one place because two entry points need the same answer:
- * `app.ts` hands the queue to the ingestion route, and `index.ts` starts it and
- * reconciles against it at boot.
+ * `app.ts` hands the queue to the ingestion route, and `ticket-jobs.ts` starts
+ * it and reconciles against it at boot.
  *
  * `undefined` when either half is missing — no database, or no model — which is
  * the `getDb()` / `createAuth(db)` / `createReplyPolisher()` shape this codebase
  * uses everywhere for a dependency the API is expected to boot without. Unlike
  * the polisher and the summariser there is no route to answer 503: ingestion
  * simply marks the ticket `skipped`, which is the honest record that nothing
- * was asked and nothing is coming. It is also what keeps pg-boss out of the
- * test and E2E databases, neither of which configures a model — so no `pgboss`
- * schema is ever created there.
+ * was asked and nothing is coming.
+ *
+ * The pg-boss instance is a parameter rather than built here, which it used to
+ * be. There are two background features now and they share one connection, one
+ * `start()` and one `stop()` — see `ticket-jobs.ts`, which owns all three. Two
+ * instances against one database would each migrate the same `pgboss` schema
+ * and each hold their own pool for no gain.
  */
 export function createTicketClassification(
   db: Database | undefined,
+  boss: PgBoss,
 ): ClassificationQueue | undefined {
   const classify = createTicketClassifier();
-  // `db` exists only when DATABASE_URL does, so the assertion below is the
-  // type system catching up with that rather than an assumption.
-  if (!db || !classify || !env.DATABASE_URL) return undefined;
-
-  const boss = new PgBoss({
-    connectionString: env.DATABASE_URL,
-    // Its own small pool, separate from the app's Bun `SQL` handle — see the
-    // note at the top of this file for why it cannot share one. Small because
-    // it carries maintenance, two workers and the occasional send, none of
-    // which is concurrent with itself.
-    max: 2,
-    // Turns on the instance-level LISTEN connection that `notify: true` on the
-    // queue needs. Without it the queue's `notify` flag is inert and dispatch
-    // falls back to `pollingIntervalSeconds`.
-    useListenNotify: true,
-  });
+  if (!db || !classify) return undefined;
 
   return createClassificationQueue(
     boss,

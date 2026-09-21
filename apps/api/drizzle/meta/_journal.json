@@ -57,6 +57,13 @@
       "when": 1789988266691,
       "tag": "0007_medical_moira_mactaggert",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1790004760382,
+      "tag": "0008_pale_fenris",
+      "breakpoints": true
     }
   ]
 }
