@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Runtime
 
-**Bun, not Node/npm.** Everything runs through `bun` — the Postgres driver is Bun's native `SQL` class, and workspace deps use `workspace:*`. TypeScript is executed directly; there is no build step in dev. The exception is test runners: `bun:test` for `apps/api` and `packages`, **Vitest for `apps/web`** (React components), Playwright for `e2e`. See Testing below.
+**Bun, not Node/npm.** Everything runs through `bun` — the Postgres driver is Bun's native `SQL` class, and workspace deps use `workspace:*`. The one exception is **pg-boss**, which runs its own `pg` pool against the same database because Bun's driver cannot bind array parameters — see Classification. TypeScript is executed directly; there is no build step in dev. The exception is test runners: `bun:test` for `apps/api` and `packages`, **Vitest for `apps/web`** (React components), Playwright for `e2e`. See Testing below.
 
 ## Commands
 
@@ -91,7 +91,7 @@ preload that registers happy-dom *and* puts Bun's native `fetch` back, or the
 | shadcn/ui on Radix | shadcn/ui on **Base UI** (`@base-ui/react`) |
 | React Router 7 | React Router 8 |
 
-The implementation plan's phase numbering is still the shared vocabulary — code comments reference "Phase 6" and "Phase 7" to mark deliberate placeholders. Current state is roughly Phase 0 complete, Phase 4 (auth) landed early, and the plain half of Phase 5 (email → ticket) landed after it: `db/schema.ts` re-exports the auth tables plus `ticket`, `GET /api/tickets` reads real rows, and there is no email *provider*. There is no worker *process* either — the automatic classifier runs in-process, after the response; see Classification below.
+The implementation plan's phase numbering is still the shared vocabulary — code comments reference "Phase 6" and "Phase 7" to mark deliberate placeholders. Current state is roughly Phase 0 complete, Phase 4 (auth) landed early, and the plain half of Phase 5 (email → ticket) landed after it: `db/schema.ts` re-exports the auth tables plus `ticket`, `GET /api/tickets` reads real rows, and there is no email *provider*. The automatic classifier is the one piece of background work, and it runs on **pg-boss** — a job queue inside the same Postgres, worked by the API process itself rather than by a separate worker deployment; see Classification below.
 
 The domain vocabulary was cut down when ingestion landed, and `packages/shared/src/domain.ts` no longer matches project-scope.md: statuses are `open | resolved | closed` (no `new`, no `pending`) and categories are `general_questions | technical | refund_request`. The short category list is now load-bearing in a second way: it is the closed set the classifier picks from, and `classify-ticket.ts` builds its prompt out of `TICKET_CATEGORIES` so a fourth category is offered to the model in the same commit that makes the column able to hold it. `TICKET_PRIORITIES` and `ROUTING_QUEUES` are still there, consumed by nothing, as the shape a later phase grows into.
 
@@ -141,7 +141,7 @@ Staff-only console: students never log in. Sessions live in the `session` table 
 
 ### Ingestion — email becomes a ticket
 
-`POST /api/inbound-email` is the whole of it. One delivered email becomes one `ticket` row, synchronously; there is no worker process and no broker. A classifier *does* run now, but never inside the request — see Classification below. The `ticket_reply` table beside it holds the *outbound* half — see Replies below — and is not an inbound message table: a student's reply still opens a new ticket.
+`POST /api/inbound-email` is the whole of it. One delivered email becomes one `ticket` row, synchronously, and there is no broker to run beside Postgres. A classifier *does* run now, on a pg-boss job sent after the response — never inside the request. See Classification below. The `ticket_reply` table beside it holds the *outbound* half — see Replies below — and is not an inbound message table: a student's reply still opens a new ticket.
 
 - **It is the API's only unauthenticated write, and necessarily so.** Whatever delivers the mail — a provider webhook, a forwarding script, `bun run email:send` — holds no session and never will. It is mounted at `/api` *above* `requireAuth` in `app.ts` for that reason, and `INBOUND_EMAIL_SECRET` presented as `x-inbound-secret` stands in for the session. That secret is optional in development (a local `curl` should not need a ceremony) and `env.ts` refuses to boot in production without one, exactly like `BETTER_AUTH_SECRET`. The comparison lives in the exported pure function `isAuthorizedSource` because `env` is parsed once at import — a test cannot configure a secret and then make a request against it, so the guard has to be reachable some other way, and an untested guard on the one open write is not worth having.
 - **`inboundEmailBodySchema` is the provider seam, not a provider payload.** It is the small intersection every provider can produce; a Mailgun or SES adapter's entire job becomes mapping its webhook onto this shape and posting it, so nothing downstream ever sees a provider-shaped object. It is `strictObject` for a sharper reason than the user writes: a plain `z.object` strips unknown keys, so an adapter that spelled the body `bodyText` would have the email's contents silently dropped and still be answered 201.
@@ -166,105 +166,138 @@ Staff-only console: students never log in. Sessions live in the `session` table 
 ### Classification — the category fills itself in, after the response
 
 `apps/api/src/ai/classify-ticket.ts` (the prompt) and
-`apps/api/src/ticket-classification.ts` (when it runs). One delivered email goes
-to a model and comes back as one of the three categories, or as nothing. There
-is no button and no route: it is a consequence of ingestion.
+`apps/api/src/ticket-classification.ts` (when it runs, on **pg-boss**). One
+delivered email goes to a model and comes back as one of the three categories,
+or as nothing. There is no button and no route: it is a consequence of
+ingestion.
 
 - **It is non-blocking, and the ordering is the feature.** `POST
-  /api/inbound-email` writes the row, answers 201 in single-digit milliseconds,
-  and *then* hands the id to an in-process queue. A model call takes seconds and
-  is allowed sixty of them (`TIMEOUT_MS`), which is not time a mail provider's
-  webhook will wait — it times out and redelivers, so a slow classification
-  inside the request would turn into a duplicate delivery of mail that was
-  already accepted. `enqueue` is synchronous, returns before any work starts,
-  and returns `void` rather than a promise precisely so a caller cannot be
-  tempted to await it.
+  /api/inbound-email` writes the row, answers 201 in tens of milliseconds, and
+  *then* sends a pg-boss job. A model call takes seconds and is allowed sixty of
+  them (`TIMEOUT_MS`), which is not time a mail provider's webhook will wait —
+  it times out and redelivers, so a slow classification inside the request would
+  turn into a duplicate delivery of mail that was already accepted.
+- **The enqueue stays after the response even though it is now fast**, and the
+  reason changed. `boss.send` is one INSERT, so it could safely go before the
+  201; what keeps it after is a priority, not a latency. Losing mail is
+  unrecoverable and failing to classify is not, so the queue is never in the
+  critical path of the one write this API accepts from outside. Hence the catch
+  around it — and hence `reconcile()`.
 - **`ticket.classification` is the state, and it is not derivable from
   `category`.** A ticket with no category might be one the model has not reached
   yet, one it read and declined to place, one it could not be reached about, or
   one nobody ever tried to classify — four different things to do about it, and
   rendering all four as "unclassified" is what makes a classifier that runs
   *after* the response indistinguishable from one that is broken. Hence
-  `skipped | pending | done | failed`; see `TICKET_CLASSIFICATIONS` for what
-  each one means. Note `done` does **not** imply a category: declining is a
-  successful answer.
+  `skipped | pending | done | failed`; see `TICKET_CLASSIFICATIONS`. Note `done`
+  does **not** imply a category: declining is a successful answer.
 - **The column defaults to `skipped`, not `pending`**, which is what keeps the
   migration honest: every ticket that predates the column reads as "nobody
   asked" rather than as a hundred jobs queued against a classifier that will
-  never run — and the boot sweep would otherwise pick all of them up and spend a
-  model call each. Ingestion writes `pending` **in the INSERT**, so the row is
-  pending from the instant it exists: true in the 201, true for a reader who
-  refreshes a millisecond later, and true if the process dies before the
-  microtask ever runs.
+  never run. Ingestion writes `pending` **in the INSERT**, so the row is pending
+  from the instant it exists — true in the 201, and true if the process dies
+  before the job is ever sent.
 - **`classification` is on `ticketSummarySchema`, not the detail** — the
   opposite call to the assignee's, and for the opposite reason. It costs no
-  join, it is already on the row, and the queue is exactly where it has to be
-  readable: the first thing anyone sees of a new ticket is a list row with no
-  category.
-- **The queue is in-memory and in-process, deliberately.** No Redis, no outbox,
-  no worker process; introducing one for a single model call per email would be
-  infrastructure bought against a load nobody has. What stands in for durability
-  is that the *state* is in Postgres even though the queue is not, so a process
-  that dies mid-flight leaves a true fact behind rather than a lost job, and
-  `resume()` on the next boot re-queues every `pending` row. What is genuinely
-  given up is exactly-once across replicas — two API processes sharing a
-  database can both classify one ticket, costing a wasted call and writing the
-  same value twice. `SELECT … FOR UPDATE SKIP LOCKED` over an outbox is the
-  shape that fixes it, and the day this runs on more than one process is the day
-  it is worth it.
-- **`resume()` is called from `index.ts` and never from `createApp`.** Owning
-  the backlog is a statement about being *the server process*, not about having
-  built an Express app — a sweep inside the factory would mean every
-  `createApp()` in the test suite quietly claiming a production backlog. It is
-  not awaited before `listen` either: a slow query there would delay the port
-  opening, and an old ticket waiting a few more seconds is not worth a health
-  check failing over.
+  join, it is already on the row, and the queue is where it has to be readable.
+
+**Why pg-boss, and what it replaced.** This was an in-memory FIFO with a
+microtask pump. Everything below was a hole in that, and each is now the
+library's problem rather than ours:
+
+- **Jobs survive the process.** A deploy mid-classification used to drop work on
+  the floor.
+- **Retries with backoff.** The failure that actually happens is a throttled
+  free tier, and the honest answer is "ask again shortly". A ticket is marked
+  `failed` only once pg-boss has exhausted `retryLimit` — measured at **~3.5
+  minutes** for three attempts at a 15s base, during which the ticket reads
+  "Classifying…" and the SPA polls it. That ceiling is the deliberate trade;
+  read `SEND_OPTIONS` before changing it.
+- **More than one process.** Dispatch is a row lock, so replicas share the work.
+  Verified accidentally and conclusively during development: a second API
+  started with a deliberately broken `OPENROUTER_MODEL` ingested a ticket, and
+  the healthy instance on another port took the job and classified it.
+
+Things about the pg-boss setup that are load-bearing:
+
+- **It owns its own `pgboss` schema and migrates it on `start()`.** That makes
+  it the second migration system in the repo. drizzle-kit does not know about it
+  and must not be pointed at it; `bun run db:generate` will never mention it.
+- **It uses its own `pg` pool, not the app's Bun `SQL` handle**, and that is not
+  a preference. pg-boss accepts a caller's driver (`db: { executeSql }`), but
+  Bun's driver cannot encode array parameters — `sql.unsafe("… $1::text[]",
+  [["a"]])` reaches Postgres as the string `a` and fails with `malformed array
+  literal` — and pg-boss binds arrays throughout. (Bun's pooled client also
+  refuses the bare `BEGIN` pg-boss issues while migrating, unless the pool is
+  `max: 1`.) Two pools against one database is the cheaper price.
+- **The queue policy is `short`, and `singleton` is the trap.** `short` allows
+  one job per `singletonKey` *in the queued state*, so a second send for a
+  ticket already waiting is answered `null`. That matters because `reconcile()`
+  sends for every ticket the table calls `pending` at every boot — usually the
+  set that still has live jobs — so without the dedupe each restart would double
+  the queue. `singleton` looks right and is not: it serialises same-key jobs but
+  still creates them.
+- **`notify: true` on the queue plus `useListenNotify: true` on the instance is
+  what keeps it feeling immediate** — measured at ~16ms from send to handler,
+  against a 30s backstop poll. They are two separate flags and the queue's one
+  is inert without the instance's; dispatch then silently falls back to polling.
+- **`expireInSeconds` must clear the model's own 60s deadline.** Below it,
+  pg-boss reclaims a job that is still legitimately waiting on a model and runs
+  it twice, with nothing anywhere to say so.
+- **The dead letter queue exists because a handler cannot see its own retry
+  count.** pg-boss hands a worker `{ id, name, data, … }` and nothing about
+  attempts, so "throw and let it retry" and "give up and mark the ticket
+  `failed`" cannot live in one function. The main worker therefore *only ever
+  throws*, and the only thing that writes `failed` is the worker on
+  `DEAD_LETTER_QUEUE`, which by definition runs once, after the last attempt.
+  It must be created before the queue that names it.
+- **The main worker returns rather than throws when there is nothing to do.** A
+  ticket a colleague categorised mid-flight claims as `undefined`; throwing
+  there would be read as failure, retried three times, and dead-lettered into
+  `failed` — over the top of their decision. The dead letter worker re-claims
+  for the same reason.
+- **`start()`, `reconcile()` and `stop()` are called from `index.ts`, never
+  `createApp`.** Running a queue is a statement about being the server process;
+  starting pg-boss inside the factory would have every `createApp()` in the test
+  suite connect to a database, migrate a schema and register workers. Neither
+  start nor reconcile is awaited before `listen` — they would delay the port and
+  therefore a platform's health check — and a failure is logged, not fatal: the
+  API serves tickets, replies, users and auth perfectly well without a
+  classifier.
+- **`stop()` is ungraceful on purpose.** A model call is allowed sixty seconds
+  and `index.ts` force-exits after ten, so waiting would just be waiting for the
+  kill — and it is exactly what durability makes unnecessary: an abandoned job
+  returns to `created` when it expires and runs on whichever process is up.
+
+Things about the ticket row that are load-bearing:
+
 - **Every write is guarded on `classification = 'pending'` AND a null
-  category**, not just on the id. Between a job being queued and a model
-  answering, an agent can open the ticket and categorise it themselves; an
-  unguarded UPDATE would overwrite a human's decision with a machine's some
-  seconds later, with nothing on screen to explain it. The other half of that
-  rule lives in `PATCH /api/tickets/:id`, which writes `classification:
-  "skipped"` in the same statement as any category change — without it the row
-  stays `pending` forever, because the guarded UPDATE correctly refuses to move
-  it and nothing else would.
+  category**, not just on the id. An agent can categorise the ticket during the
+  seconds — or minutes, across retries — that a job is in flight; an unguarded
+  UPDATE would overwrite a human's decision with a machine's, with nothing on
+  screen to explain it. The other half lives in `PATCH /api/tickets/:id`, which
+  writes `classification: "skipped"` in the same statement as any category
+  change — without it the row stays `pending` forever, because the guarded
+  UPDATE correctly refuses to move it and nothing else would.
 - **`updatedAt` is written back explicitly, and it looks redundant.** The column
-  is `$onUpdate` and the queue's default sort is `updated_at desc`, so leaving
-  it out of `.set()` restamps it with `now()` — a boot sweep classifying a
+  is `$onUpdate` and the queue's default sort is `updated_at desc`, so leaving it
+  out of `.set()` restamps it with `now()` — a reconciliation pass classifying a
   week-old backlog would silently drag all of it to the top of everyone's queue.
-  Classification is something that happened to the *record* of a ticket, not
-  activity on the ticket. `dev/seed-tickets.ts` restates the column for the same
-  reason.
-- **The dedupe set holds in-flight ids, not just waiting ones.** `resume()`
-  reads every row still `pending`, and a ticket being classified right now is
-  one of them — the worker has not written its answer yet. Dropping an id when
-  it comes *off* the queue rather than when its job *ends* leaves exactly that
-  window open. A unit test pins it, because it is one wasted model call and
-  nothing else: no error, no wrong value.
-- **Concurrency is 1.** The thing on the other end is a shared free-tier pool
-  that throttles — the reason `OPENROUTER_MODEL` is a chain at all — and the
-  only burst this ever sees is a bulk replay, where fanning out turns every
-  request into a 429 and every ticket into `failed`. Serial, a backlog takes as
-  long as it takes and nothing is waiting on it.
-- **One attempt per ticket, and no retry button.** The model chain in
-  `openrouter.ts` already *is* the retry strategy, and re-asking a pool that
-  just refused is what `maxRetries: 0` exists to avoid. A `failed` ticket is
-  answered by the category select on the detail page, which takes one click and
-  is the answer a human was going to have to give anyway; the SPA says so in as
-  many words rather than leaving the reader to wonder whether something is still
-  running.
-- **The SQL sits behind `ClassificationStore`**, which is why any of the above
-  is testable: `bun run test` runs with `DATABASE_URL` stripped, so a worker
-  holding a `Database` would be reachable only by the parts that do not touch
-  it — which is none of them. Same instinct as `isAuthorizedSource` and
-  `searchPattern` being exported pure functions.
+  Classification happened to the *record* of a ticket, not on the ticket.
+  `dev/seed-tickets.ts` restates the column for the same reason.
+- **The SQL sits behind `ClassificationStore` and the decisions behind
+  `createClassificationWorker`**, which is why any of this is testable: `bun run
+  test` runs with `DATABASE_URL` stripped, so a worker holding a `Database` — or
+  a `PgBoss` — would be reachable only by the parts that touch neither, which is
+  none of them. `ticket-classification.test.ts` also pins the pg-boss
+  *configuration* (`short`, `notify`, the retry options, the expiry above the
+  model deadline), because those are our decisions and every one of them fails
+  silently.
 - **The SPA polls, but only while something on screen will change on its own.**
   `TicketDetailPage` refetches every 4s while its ticket is `pending`;
   `TicketListPage` every 5s while *the page being looked at* holds a pending row
   — gated on the visible page rather than any loaded page, because it is an
-  infinite query and a refetch re-fetches every page walked so far. Both switch
-  themselves off as soon as the state leaves `pending`, which every outcome
-  does.
+  infinite query and a refetch re-fetches every page walked so far.
 
 ### Ticket updates — status, category, assignee
 

@@ -203,21 +203,37 @@ export function createInboundEmailRouter(
       res.status(201).json(toTicketDetail(created, null));
 
       /**
-       * After the response, and that ordering is the feature.
+       * After the response, and that ordering is still deliberate — though it
+       * now buys something different than it used to.
        *
-       * A model call takes seconds and is allowed sixty of them, which is not
-       * time a mail provider's webhook will wait — it would time out and
-       * redeliver, turning a slow classification into a duplicate delivery of
-       * mail that was already accepted. So the 201 goes out first and this
-       * hands the id to a queue that does its work on a later tick. `enqueue`
-       * is synchronous and returns before any of it starts; see
-       * `ticket-classification.ts`.
+       * The model call is decoupled by the queue itself: `enqueue` is one
+       * INSERT into pg-boss's job table and returns in a millisecond or two,
+       * so putting it *before* the 201 would no longer risk the timeout-and-
+       * redeliver problem that shaped this route. What keeps it here is a
+       * priority rather than a latency: losing mail is unrecoverable and
+       * failing to classify is not. If pg-boss is unreachable, a delivery must
+       * still become a ticket — so the queue is never in the critical path of
+       * the one write this API accepts from outside.
+       *
+       * Hence the catch. A failed send leaves a row that says `pending` with
+       * nothing queued behind it, which is precisely what
+       * `ClassificationQueue.reconcile()` exists to find on the next boot. It
+       * is logged rather than thrown because the response has already gone: an
+       * Express 5 handler that rejects after `res.json()` reaches the error
+       * handler, which would then try to write a second time.
        *
        * Read off the row rather than off `classify`, so the queue and the
-       * column can never disagree about whether a job exists.
+       * column can never disagree about whether a job is owed.
        */
       if (classification && created.classification === "pending") {
-        classification.enqueue(created.id);
+        try {
+          await classification.enqueue(created.id);
+        } catch (error) {
+          req.log.error(
+            { err: error, ticketId: created.id },
+            "could not queue a ticket for classification",
+          );
+        }
       }
       return;
     }

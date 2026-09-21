@@ -26,33 +26,37 @@ const server = app.listen(env.PORT, () => {
 });
 
 /**
- * Pick up whatever the last process left half-done.
+ * Bring the classification queue up, then put it back in agreement with the
+ * ticket table.
  *
- * The classification queue is in memory, so a restart — a deploy, a crash, a
- * Ctrl-C during `bun run dev` — drops every job it was holding. What survives
- * is the `classification = 'pending'` on the rows themselves, which is why
- * ingestion writes it in the INSERT: those rows are the queue's durable half,
- * and this is the one read that turns them back into work.
+ * Both halves live in `index.ts` and not in `createApp` on purpose. `createApp`
+ * is a factory the test suite calls, and starting pg-boss there would mean
+ * every `createApp()` in a test — or any future in-process use of the app —
+ * connecting to a database, migrating a schema and registering workers.
+ * Running the queue is a statement about being *the server process*, not about
+ * having built an Express app.
  *
- * It lives in `index.ts` and not in `createApp` on purpose. `createApp` is a
- * factory the test suite calls, and a sweep firing there would mean every
- * `createApp()` in a test — or any future in-process use of the app — quietly
- * claiming a production backlog. Owning the backlog is a statement about being
- * *the server process*, not about having built an Express app.
+ * Deliberately not awaited before `listen`: `start()` migrates pg-boss's schema
+ * and `reconcile()` reads every pending ticket, and neither is worth delaying
+ * the port — and therefore a platform's health check — for. Until it resolves,
+ * ingestion's `enqueue` fails and is caught, which leaves rows marked `pending`
+ * that this very call is about to pick up.
  *
- * Deliberately not awaited before `listen`: a slow query here would delay the
- * port opening, and an old ticket waiting a few more seconds for a category is
- * not worth a health check failing over. A failure is logged and dropped — the
- * rows stay pending, and the next boot tries again.
+ * A failure is logged and dropped rather than crashing the process. The API
+ * serves tickets, replies, users and auth without a classifier; refusing to
+ * boot because a background queue could not start would take all of that down
+ * with it.
  */
-void classification
-  ?.resume()
-  .then((count) => {
-    if (count > 0) logger.info({ count }, "resumed pending classifications");
-  })
-  .catch((err: unknown) => {
-    logger.error({ err }, "could not resume pending classifications");
-  });
+void (async () => {
+  if (!classification) return;
+  await classification.start();
+  const count = await classification.reconcile();
+  if (count > 0) {
+    logger.info({ count }, "re-queued tickets still awaiting classification");
+  }
+})().catch((err: unknown) => {
+  logger.error({ err }, "could not start the classification queue");
+});
 
 /**
  * Container platforms send SIGTERM and then kill after a grace period. Stop
@@ -62,6 +66,15 @@ async function shutdown(signal: string): Promise<void> {
   logger.info({ signal }, "shutting down");
   server.close(async (err) => {
     if (err) logger.error({ err }, "error closing server");
+    // Before `closeDb`, and tolerant of its own failure: a queue that will not
+    // stop cleanly must not keep the process from closing its database handle.
+    // Anything in flight is abandoned rather than waited for — the job returns
+    // to `created` when it expires and runs again wherever the next process is.
+    await classification
+      ?.stop()
+      .catch((error: unknown) =>
+        logger.error({ err: error }, "error stopping the classification queue"),
+      );
     await closeDb();
     process.exit(err ? 1 : 0);
   });
