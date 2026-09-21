@@ -1,0 +1,1 @@
+ALTER TABLE "ticket" ADD COLUMN "resolved_at" timestamp (3) with time zone;

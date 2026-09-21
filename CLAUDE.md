@@ -863,11 +863,167 @@ everything in `openrouter.ts` and nothing above it.
 - **Nothing here is signed or sent**, so unlike the polisher the route needs no
   `req.user`: a summary names the people in the thread, never its reader.
 
+### The dashboard — five numbers over every ticket
+
+`GET /api/stats` and `apps/web/src/routes/DashboardPage.tsx`, at `/dashboard`.
+Total tickets, open tickets, how many the assistant resolved, that as a share,
+and the average time a ticket takes to resolve.
+
+- **It counts what the queue hides, which is the whole reason it is not derived
+  from `GET /api/tickets`.** That route defaults `handledBy` to `human`, so its
+  `total` is the work a person still has to do — counting it would answer "how
+  many tickets has the AI resolved" with a number chosen to exclude exactly
+  those. These aggregates are over the whole table, unfiltered.
+- **`ticket.resolved_at` exists because the average cannot be computed without
+  it, and every approximation is wrong in a way the number hides.**
+  `updated_at` is the tempting stand-in and is not a resolution time at all: it
+  restamps on an assignment, a category change, a reopen, so a ticket resolved
+  in an hour and re-tagged a week later reads as a week and the mean drifts
+  upward every time anybody touches an old ticket. A dashboard figure nobody can
+  check is worse than no figure.
+- **`resolutionStamp` in `routes/tickets.ts` is the rule, exported so
+  `tickets.test.ts` can pin it** — the same device `searchPattern` uses, and for
+  the same reason: no test with a stubbed database reaches the UPDATE, and every
+  way of getting this wrong is silent. Moving **out of `open`** stamps now;
+  moving **to `open`** clears it, because a reopen says the ticket was not
+  resolved after all and a stale stamp would both keep a withdrawn resolution in
+  the average and then swallow the real one; **`resolved -> closed` leaves it
+  alone**, because closing an already-resolved ticket is filing, not resolving,
+  and restamping there turns a resolution-time average into an
+  archiving-habits average. `undefined` means "do not write the column" and is
+  distinct from the `null` that clears it — the same optional/nullable split
+  `updateTicketBodySchema` uses.
+- **The auto-resolver stamps it too**, in the guarded UPDATE inside `resolve`.
+  Without that the average is an average of the tickets people got to first, and
+  the assistant's — which are the fast ones — resolve without ever recording
+  when.
+- **`dev/seed-tickets.ts` writes `resolved_at` in the same statement as the
+  backdated `updated_at`**, and to the same value: for a resolved or closed
+  fixture that timestamp *is* the moment `updatedAtFor` invented for the work
+  finishing, and nothing has touched the row since. Without it a freshly seeded
+  database shows a hundred resolved tickets beside "no resolution times
+  recorded", which reads as a broken tile rather than as a corpus that predates
+  the column.
+- **`GET /api/stats` is flat, not `/api/tickets/stats`.** Express matches in
+  order, so the nested spelling would have to stay above `/tickets/:id` — move it
+  one line down and `stats` arrives as an id, fails the UUID parse and answers
+  400 for a route that exists. A flat noun beside `/assignees` has no ordering to
+  preserve, and `app.test.ts` pins that it is not swallowed. It is open to every
+  signed-in agent for the reason `/assignees` is: these are counts of the queue
+  everyone works, and nothing in them names a person.
+- **One query, not five.** Postgres computes every aggregate in a single pass
+  with `count(*) filter (where …)`, the idiom `seed-tickets.ts` already uses.
+  Five round trips would additionally be five *moments*, and a ticket resolved
+  between the second and the third makes a dashboard whose tiles do not add up —
+  the one thing a page of numbers must never do. `avg` needs `::float8`: it
+  returns `numeric`, which the driver hands back as text to preserve precision it
+  does not have here, and the response schema would throw on a good average.
+- **`aiResolved` is read off `auto_resolution`, never off `status`.** The two
+  answer different questions: a ticket the assistant resolved and a colleague
+  reopened is no longer `resolved` and was still resolved by the AI; a ticket a
+  person closed by hand is `resolved` and was not.
+- **The response carries counts; the percentage is derived in the SPA.** A
+  division on the wire is a second place the numerator and denominator get
+  chosen, so a tile reading "30%" beside tiles reading 110 and 30 could disagree
+  with both and nothing on screen would say which had drifted. The page does the
+  arithmetic the reader can do themselves.
+- **Null is not zero, and both tiles say so.** `averageResolutionSeconds` is
+  null when no row carries a `resolved_at`, and the page renders an em dash
+  rather than "0m" — "nothing has been resolved" and "everything was resolved
+  instantly" are opposite facts. `resolutionSampleSize` ships for the same
+  reason: `resolved_at` only exists from its migration onward, so naming the
+  count is what stops an average of fifty-four reading as an average of all
+  hundred and ten.
+- **Two shares of the same number, deliberately.** The headline is
+  `aiResolved / total` — what fraction of the workload the assistant closed,
+  which is what a team measures when asking whether the feature pays for itself.
+  The caption adds `aiResolved / (aiResolved + aiEscalated)` — how often it can
+  answer when it looks at something, which is about the assistant rather than the
+  workload. One percentage would have to be one of them and would be read as the
+  other, which is why `aiEscalated` is on the response at all.
+- **It does not poll, unlike the queue.** The queue refetches while a ticket on
+  screen is mid-classification, because something there changes on its own within
+  seconds. These counts move all day and no single reading is the one the reader
+  is waiting for; the client's 30s `staleTime` refetches on a return to the tab,
+  and a tile that ticks while being read is movement bought for nothing.
+**The trend chart — arrivals per day, under the tiles.** One bar per day for
+`TICKET_TREND_DAYS` (30), on the same `/api/stats` response as the counts above
+it so the two cannot describe different moments.
+
+- **`tz` is a query parameter because "tickets per day" has no answer without
+  one.** A day is a range of instants and which range depends on where the
+  reader is standing: bucketing in UTC files a ticket that arrived at 9pm in
+  Tehran under the following day, so an agent's busiest evening lands on
+  tomorrow's bar and today's is short a few hours. The SPA sends
+  `Intl.DateTimeFormat().resolvedOptions().timeZone`; the schema defaults to UTC
+  so a `curl` still works. Verified against the live database from both ends of
+  the clock — `Pacific/Kiritimati` (+14) shifts the whole window forward a day
+  and `Pacific/Niue` (-11) drops a ticket out of it entirely, which is the
+  proof the conversion is doing something rather than being decorative.
+- **The zone is validated in `packages/shared`, not left to Postgres.** It is
+  interpolated into `timezone(…)`, so an unknown name comes back as a runtime
+  error — a 500 blaming this API for a caller's typo. `Intl` throws for anything
+  its tz database does not know, and that is the same IANA database Postgres
+  ships, so the cheap check agrees with the thing that will actually run.
+- **`generate_series` LEFT JOINed to the tickets, never a bare `GROUP BY`.** A
+  group-by answers only about days that *have* rows, so a quiet Sunday comes
+  back missing — and a 30-bar chart handed 28 rows does not draw a gap, it draws
+  28 bars and slides every later one onto the wrong date. The zero-fill is the
+  server's job because the response has to be a complete statement about the
+  window it names. `ticket-trend` tests pin that empty days survive to the
+  chart.
+- **`to_char`, not a bare `date`.** The driver turns a `date` into a `Date` at
+  midnight UTC and the browser then renders it in local time — a day earlier for
+  anyone west of Greenwich, which is the exact off-by-one the bucketing exists
+  to prevent. It crosses the wire as `YYYY-MM-DD`, and `parseCalendarDay` builds
+  a **local** midnight from the parts rather than calling `new Date(iso)`, which
+  would reintroduce the bug on the client instead.
+- **It scans `ticket`, deliberately.** The conversion on `created_at` means no
+  index on the column can serve the join. Same policy the search's `ilike`
+  follows: a functional index is earned by a query plan that needs one.
+- **Divs and flexbox, not SVG and not a charting library.** Thirty bars of one
+  series need no scales, no axis engine and no layout pass; flexbox gives
+  responsive widths where an SVG would want a `viewBox` and a resize observer. A
+  chart dependency is worth adding the day this needs a second series, a time
+  axis that skips weekends, or interpolation — none of which is a bar per day.
+- **One series, so no legend** — the card title names the bars. The fill is
+  `bg-primary`, **not** the theme's `--chart-1`: that token is `oklch(0.87 0 0)`
+  in *both* light and dark, which is near-invisible on a white card. `--primary`
+  is the one that actually differs per mode.
+- **A nonzero day always has a mark; an empty day never does.** A count of 1
+  against a busy day's scale is a sub-pixel bar, so bars carry a 2px
+  `min-height` — the difference between "one ticket" and "none" is the one this
+  chart cannot lose. An all-zero window renders an empty state instead of thirty
+  invisible bars, which would read as a chart that failed to load.
+- **The readout sits above the plot rather than floating over the hovered bar**,
+  because `Card` is `overflow-hidden` and a tooltip on the first or last column
+  would be clipped by the card's own corner — and those two are the bars most
+  likely to be inspected. It always occupies its line, so the chart does not
+  jump as the pointer crosses it.
+- **Axis labels are absolutely positioned and anchored, not `text-align`ed, and
+  this is the one that had to be measured to be found.** A label is far wider
+  than its column — thirty days across a phone leaves each about eight pixels —
+  so the line overflows, and *an overflowing `nowrap` line ignores `text-align`
+  and always spills right*. `text-align: right` on the last label changed
+  nothing: it still ran 14px past a card that clips, rendering "Sep 21" as
+  "Sep", the one label that says where the window ends. An absolutely positioned
+  span is sized to its own text, so anchoring `right-0` actually holds it
+  inside. Checked at 420/768/1100px.
+- **The bars carry no `tabindex`; the accessible path is a `sr-only` table.**
+  Thirty tab stops between the tiles and whatever follows is a keyboard trap
+  dressed as access, and the table is the same numbers in a form a screen reader
+  can walk.
+
+- **It is not the index route.** The queue keeps `/`: a dashboard that took it
+  would put a page of numbers between an agent and their work every time they
+  sign in. There is exactly one hero figure on it, which is what makes the size
+  mean "start here".
+
 ### Web
 
 Routing is defined in one place, `apps/web/src/main.tsx`. `/login` sits outside the layout; **everything else nests under `RequireAuth`** so a new route is protected by default. `RequireAdmin` nests inside that for admin-only screens.
 
-The queue lives at the index route, `/`, and the nav links to it with `end` — there is no separate `/tickets` path, because one screen with two URLs is a thing to keep in sync for no gain. `MainNav` in `AppLayout.tsx` sits on the left with the wordmark; the right-hand group is about the session (environment, identity) rather than the app. `AppLayout.test.tsx` asserts that as *containment*, not document order: the header is `justify-between`, so a nav moved to the right still follows the wordmark and still precedes the sign-out button — an order check passes on both layouts and tests nothing.
+The queue lives at the index route, `/`, and the nav links to it with `end` — there is no separate `/tickets` path, because one screen with two URLs is a thing to keep in sync for no gain. `/dashboard` sits beside it and needs no `end`: it has no children, so there is nothing for the active state to over-match. `MainNav` in `AppLayout.tsx` sits on the left with the wordmark; the right-hand group is about the session (environment, identity) rather than the app. `AppLayout.test.tsx` asserts that as *containment*, not document order: the header is `justify-between`, so a nav moved to the right still follows the wordmark and still precedes the sign-out button — an order check passes on both layouts and tests nothing.
 
 `TicketListPage` and `UsersPage` are the same screen twice — a `useInfiniteQuery` over the keyset cursor, a "Load more" button, and a skeleton that renders the real `<thead>` so column widths do not shift — but they no longer share a table layer. `UsersPage` stays hand-rolled markup; `TicketListPage` runs on **TanStack Table v9**, which is where sorting arrived. Port `UsersPage` when it needs one, not before.
 

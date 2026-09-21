@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createBrowserRouter } from "react-router";
 import { AppLayout } from "./AppLayout.tsx";
+import { DashboardPage } from "./routes/DashboardPage.tsx";
 import { LoginPage } from "./routes/LoginPage.tsx";
 import { RequireAdmin } from "./routes/RequireAdmin.tsx";
 import { RequireAuth } from "./routes/RequireAuth.tsx";
@@ -33,6 +34,10 @@ const router = createBrowserRouter([
         element: <AppLayout />,
         children: [
           { index: true, element: <TicketListPage /> },
+          // Not the index route, deliberately: the queue is the screen an
+          // agent lives in, and a dashboard that takes "/" puts a page of
+          // numbers between them and their work every time they sign in.
+          { path: "dashboard", element: <DashboardPage /> },
           // The queue keeps its bare "/" — there is no /tickets list —
           // but a single ticket needs an address of its own, because a
           // ticket link is how work gets handed between agents.

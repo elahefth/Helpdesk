@@ -154,6 +154,35 @@ export const ticket = pgTable(
     sourceMessageId: text("source_message_id").unique(),
 
     /**
+     * When the ticket stopped being work — the moment it left `open` for
+     * `resolved` or `closed`, or NULL while it is still open.
+     *
+     * It exists because "average resolution time" cannot be computed from the
+     * columns beside it, and every approximation is wrong in a way the number
+     * hides. `updatedAt` is the tempting one and it is not a resolution time at
+     * all: it restamps on an assignment, a category change, a reopen — so a
+     * ticket resolved in an hour and re-tagged a week later reads as a week,
+     * and the average silently drifts upward every time anybody touches an old
+     * ticket. A dashboard figure nobody can check is worse than no figure.
+     *
+     * Written by the two things that resolve a ticket — `PATCH /api/tickets/:id`
+     * and the auto-resolver's `resolve` — and **cleared on a reopen**, because
+     * `resolved -> open` says the ticket was not resolved after all. The next
+     * resolution stamps it again, so the column always names the *current*
+     * resolution rather than the first attempt at one.
+     *
+     * Stamped only on a move *out of* `open`, never on `resolved -> closed`:
+     * closing an already-resolved ticket is filing, not resolving, and
+     * restamping there would credit the archive sweep with the work.
+     *
+     * NULL for every ticket resolved before this column existed. That is the
+     * honest value — those resolutions happened at a time nothing recorded —
+     * and it is why `GET /api/stats` reports the sample size its average was
+     * taken over rather than implying it covers the whole table.
+     */
+    resolvedAt: timestamp("resolved_at", { withTimezone: true, precision: 3 }),
+
+    /**
      * When the mail was received, per the source. Distinct from `createdAt`:
      * replaying an archive weeks later must not make every ticket look like it
      * arrived today.

@@ -9,6 +9,7 @@ import {
   isNull,
   notInArray,
   or,
+  sql,
   type SQL,
 } from "drizzle-orm";
 import {
@@ -17,6 +18,8 @@ import {
   createTicketReplyBodySchema,
   listTicketsQuerySchema,
   polishTicketReplyBodySchema,
+  TICKET_TREND_DAYS,
+  ticketStatsQuerySchema,
   ticketSummarySchema,
   updateTicketBodySchema,
   type CreateTicketReplyResponse,
@@ -27,6 +30,9 @@ import {
   type TicketDetail,
   type TicketHandler,
   type TicketReply,
+  type TicketsPerDay,
+  type TicketStats,
+  type TicketStatus,
   type UpdateTicketResponse,
 } from "@helpdesk/shared";
 import { ModelError } from "../ai/openrouter.ts";
@@ -132,6 +138,41 @@ function matchesHandler(handler: TicketHandler): SQL | undefined {
   return handler === "ai"
     ? inArray(ticket.autoResolution, handled)
     : notInArray(ticket.autoResolution, handled);
+}
+
+/**
+ * What a status move does to `resolved_at` — the column the dashboard's average
+ * resolution time is computed from.
+ *
+ * Three cases, and the third is the one worth spelling out.
+ *
+ * - Moving **out of `open`** stamps now. This is the moment the ticket stopped
+ *   being work, and it is the only moment anything records it.
+ * - Moving **to `open`** clears it. A reopen says the ticket was not resolved
+ *   after all, so leaving the old stamp would keep it in the average under a
+ *   resolution that has been taken back — and then, when it is resolved for
+ *   real, quietly discard the second one as already-stamped.
+ * - **`resolved -> closed` leaves it alone.** Closing a ticket that was already
+ *   resolved is filing, not resolving; restamping there would credit whoever
+ *   tidied the queue with however long the ticket sat resolved, which turns a
+ *   resolution-time average into an archiving-habits average.
+ *
+ * `undefined` is "do not write this column", distinct from the `null` that
+ * clears it — the same optional/nullable split the PATCH body itself uses, and
+ * the reason the caller spreads the result in rather than assigning it.
+ *
+ * Exported only so `tickets.test.ts` can pin it. No test with a stubbed
+ * database reaches the UPDATE, and every way of getting this wrong is silent:
+ * a wrong stamp is a plausible number on a dashboard nobody can check.
+ */
+export function resolutionStamp(
+  from: TicketStatus,
+  to: TicketStatus | undefined,
+  now: Date = new Date(),
+): Date | null | undefined {
+  if (!to) return undefined;
+  if (to === "open") return null;
+  return from === "open" ? now : undefined;
 }
 
 /**
@@ -292,6 +333,128 @@ export function createTicketsRouter(
     res.json(body);
   });
 
+  /**
+   * The dashboard's numbers: one row of aggregates over the whole ticket table.
+   *
+   * **`/stats`, not `/tickets/stats`.** Express matches routes in order, so the
+   * nested spelling would sit above `/tickets/:id` and depend on staying there
+   * — move it one line down and `stats` arrives as an id, fails the UUID parse
+   * and answers 400 for a route that exists. A flat noun beside `/assignees`
+   * has no such ordering to preserve, and this is not a sub-resource of one
+   * ticket anyway.
+   *
+   * Open to every signed-in agent rather than admin-gated, like `/assignees`
+   * and unlike the user routes: these are counts of the queue everyone works,
+   * and nothing here names a person.
+   *
+   * One query, not five. Postgres computes every aggregate in a single pass
+   * with `filter`, and five round trips would additionally be five *moments* —
+   * a ticket resolved between the second and the third makes a dashboard whose
+   * tiles do not add up, which is the one thing a page of numbers must never do.
+   */
+  router.get("/stats", async (req, res) => {
+    // Validation before the database check, as everywhere else here: an unknown
+    // time zone deserves a 400 naming it, not a 503 blaming Postgres.
+    const query = ticketStatsQuerySchema.parse(req.query);
+
+    req.log.debug({ tz: query.tz }, "computing ticket stats");
+
+    if (!db) throw HttpError.serviceUnavailable("Database unavailable");
+
+    const [row] = await db
+      .select({
+        total: sql<number>`count(*)::int`,
+        open: sql<number>`count(*) filter (where ${ticket.status} = 'open')::int`,
+        resolved: sql<number>`count(*) filter (where ${ticket.status} = 'resolved')::int`,
+        // On `auto_resolution`, never on `status`. A ticket the assistant
+        // answered and a colleague then reopened is no longer `resolved` and
+        // the assistant still resolved it; a ticket a person closed by hand is
+        // `resolved` and the assistant did not. Counting the status would
+        // credit the AI with the second and lose it the first.
+        aiResolved: sql<number>`count(*) filter (where ${ticket.autoResolution} = 'resolved')::int`,
+        aiEscalated: sql<number>`count(*) filter (where ${ticket.autoResolution} = 'escalated')::int`,
+        // `count(col)` counts non-null values, which is exactly the sample the
+        // average below is taken over — written as the same predicate twice
+        // would be two chances to disagree about which rows counted.
+        resolutionSampleSize: sql<number>`count(${ticket.resolvedAt})::int`,
+        /**
+         * `avg` over a `timestamptz` difference: `extract(epoch from …)` turns
+         * the interval into seconds, and `::float8` is what stops it arriving
+         * as a string — `avg` returns `numeric`, which the driver hands back as
+         * text to preserve precision it does not have here. A response schema
+         * expecting a number would then throw on a perfectly good average.
+         *
+         * Null when no row carries a `resolved_at`, which the cast preserves,
+         * and which the schema wants: zero is a statement about instant
+         * resolutions rather than about an empty sample.
+         */
+        averageResolutionSeconds: sql<
+          number | null
+        >`avg(extract(epoch from (${ticket.resolvedAt} - ${ticket.createdAt})))::float8`,
+      })
+      .from(ticket);
+
+    /**
+     * Arrivals per calendar day, zero-filled across the whole window.
+     *
+     * **`generate_series` LEFT JOINed to the tickets, rather than a `GROUP BY`
+     * over `created_at`.** A group-by answers only about days that have rows,
+     * so a quiet Sunday comes back missing — and a bar chart fed 28 rows for a
+     * 30-day window does not draw a gap, it draws 28 bars and slides every
+     * later one onto the wrong date. The series is what makes the answer a
+     * complete statement about the window rather than a list of the days that
+     * happened to be busy.
+     *
+     * **Both sides of the join are converted with `timezone(tz, …)`**, so the
+     * day boundaries are the reader's rather than the server's. A hardcoded UTC
+     * would file a ticket that arrived at 9pm in Tehran under the next day.
+     *
+     * `to_char` rather than handing back a `date`: the driver would turn one
+     * into a `Date` at midnight UTC, and the browser would then render it in
+     * local time — a day earlier for anyone west of Greenwich, which is the
+     * exact off-by-one this bucketing exists to avoid.
+     *
+     * It scans `ticket`, deliberately: the conversion on `created_at` means no
+     * index on the column can serve it. That is the policy this file already
+     * applies to the search's `ilike` — a functional index is earned by a query
+     * plan that needs one, and at this table's size the scan is cheaper than
+     * the write cost of keeping one.
+     */
+    const daily = (await db.execute(sql`
+      select
+        to_char(d.day, 'YYYY-MM-DD') as date,
+        count(t.id)::int as count
+      from generate_series(
+        (timezone(${query.tz}, now()))::date
+          - make_interval(days => ${TICKET_TREND_DAYS - 1}),
+        (timezone(${query.tz}, now()))::date,
+        interval '1 day'
+      ) as d(day)
+      left join ${ticket} t
+        on (timezone(${query.tz}, t.created_at))::date = d.day::date
+      group by d.day
+      order by d.day
+    `)) as TicketsPerDay[];
+
+    // An aggregate with no GROUP BY always returns exactly one row, even over
+    // an empty table — so this fallback is for a shape that cannot occur, not
+    // for a fresh install.
+    const body: TicketStats = {
+      ...(row ?? {
+        total: 0,
+        open: 0,
+        resolved: 0,
+        aiResolved: 0,
+        aiEscalated: 0,
+        averageResolutionSeconds: null,
+        resolutionSampleSize: 0,
+      }),
+      daily,
+    };
+
+    res.json(body);
+  });
+
   router.get("/tickets/:id", async (req, res) => {
     // A path param is untrusted input like any other. A non-UUID cannot name a
     // row, so this could 404, but 400 says what is actually wrong.
@@ -381,11 +544,14 @@ export function createTicketsRouter(
       );
     }
 
+    const nextResolvedAt = resolutionStamp(current.status, nextStatus);
+
     const changes = {
       ...(input.assigneeId !== undefined
         ? { assignedToId: input.assigneeId }
         : {}),
       ...(nextStatus ? { status: nextStatus } : {}),
+      ...(nextResolvedAt !== undefined ? { resolvedAt: nextResolvedAt } : {}),
       /**
        * A human deciding the category also closes the classifier's job on this
        * ticket, which is why the two are written together and never apart.

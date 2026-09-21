@@ -6,7 +6,7 @@ import {
   TICKET_REPLY_MAX_LENGTH,
   updateTicketBodySchema,
 } from "@helpdesk/shared";
-import { searchPattern } from "./tickets.ts";
+import { resolutionStamp, searchPattern } from "./tickets.ts";
 
 /**
  * The search term's journey from query string to LIKE pattern. Both halves fail
@@ -281,5 +281,57 @@ describe("polishTicketReplyBodySchema", () => {
       polishTicketReplyBodySchema.safeParse({ body: "ok", tone: "formal" })
         .success,
     ).toBe(false);
+  });
+});
+
+/**
+ * When a status move records a resolution time, which is the whole input to the
+ * dashboard's average and is unreachable from any test with a stubbed database.
+ *
+ * Every way of getting it wrong is silent — a wrong stamp is a plausible number
+ * on a tile nobody can check against anything.
+ */
+describe("resolutionStamp", () => {
+  const NOW = new Date("2026-09-21T12:00:00.000Z");
+
+  it("stamps a move out of open", () => {
+    expect(resolutionStamp("open", "resolved", NOW)).toEqual(NOW);
+    expect(resolutionStamp("open", "closed", NOW)).toEqual(NOW);
+  });
+
+  /**
+   * The case that keeps the average honest. Closing an already-resolved ticket
+   * is filing, not resolving: restamping here would replace the time the work
+   * was done with the time somebody tidied the queue, which can be weeks later
+   * and drags the mean with it.
+   */
+  it("leaves an existing stamp alone when a resolved ticket is closed", () => {
+    expect(resolutionStamp("resolved", "closed", NOW)).toBeUndefined();
+  });
+
+  /**
+   * A reopen says the ticket was not resolved after all. Null rather than
+   * undefined, because this has to *clear* the column — leaving the old stamp
+   * would keep a withdrawn resolution in the average, and would then make the
+   * real resolution look like a no-op when it arrives.
+   */
+  it("clears the stamp on a reopen", () => {
+    expect(resolutionStamp("resolved", "open", NOW)).toBeNull();
+  });
+
+  /**
+   * `undefined` is "do not write the column", which is what keeps a PATCH that
+   * only assigns somebody from silently re-dating a resolution.
+   */
+  it("writes nothing when the status is not moving", () => {
+    expect(resolutionStamp("open", undefined, NOW)).toBeUndefined();
+    expect(resolutionStamp("resolved", undefined, NOW)).toBeUndefined();
+  });
+
+  it("defaults to the current time", () => {
+    const before = Date.now();
+    const stamped = resolutionStamp("open", "resolved");
+    expect(stamped).toBeInstanceOf(Date);
+    expect((stamped as Date).getTime()).toBeGreaterThanOrEqual(before);
   });
 });

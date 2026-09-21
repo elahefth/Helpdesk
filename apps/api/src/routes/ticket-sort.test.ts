@@ -25,6 +25,7 @@ const ROW: typeof ticket.$inferSelect = {
   classification: "skipped",
   autoResolution: "skipped",
   assignedToId: null,
+  resolvedAt: null,
   sourceMessageId: null,
   receivedAt: new Date("2026-08-20T09:15:00.000Z"),
   createdAt: new Date("2026-08-20T09:15:01.123Z"),

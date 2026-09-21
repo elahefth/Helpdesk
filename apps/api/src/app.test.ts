@@ -474,6 +474,48 @@ describe("summarize a ticket", () => {
   });
 });
 
+describe("dashboard stats", () => {
+  it("rejects an unauthenticated request", async () => {
+    const res = await get("/api/stats");
+    expect(res.status).toBe(401);
+  });
+
+  // Open to agents for the reason /api/assignees is: these are counts of the
+  // queue everyone works, and nothing in them names a person. A 403 here would
+  // be the regression.
+  it("admits an agent as far as the database check", async () => {
+    const res = await getAuthedAs("agent", "/api/stats");
+    expect(res.status).toBe(503);
+    expect((await body(res)).error.code).toBe("service_unavailable");
+  });
+
+  // The route is flat rather than /api/tickets/stats precisely so it cannot be
+  // shadowed by /api/tickets/:id when somebody reorders the file. If this ever
+  // answers 400 "Malformed ticket id", the two have been merged.
+  it("is not swallowed by the ticket id route", async () => {
+    const res = await getAuthedAs("agent", "/api/stats");
+    expect(res.status).not.toBe(400);
+  });
+
+  it("accepts a time zone for the daily buckets", async () => {
+    const res = await getAuthedAs("agent", "/api/stats?tz=Asia/Tehran");
+    // Past validation, stopped by the absent database — which is as far as a
+    // test with no Postgres can get.
+    expect(res.status).toBe(503);
+  });
+
+  /**
+   * Validation before the database check, as everywhere else here. It matters
+   * more than usual for this one: the zone is interpolated into `timezone(…)`,
+   * so an unchecked value reaches Postgres and comes back as a 500 blaming this
+   * API for a caller's typo.
+   */
+  it("rejects a time zone that is not one", async () => {
+    const res = await getAuthedAs("agent", "/api/stats?tz=Mars/Olympus_Mons");
+    expect(res.status).toBe(400);
+  });
+});
+
 describe("assignees", () => {
   it("rejects an unauthenticated request", async () => {
     const res = await get("/api/assignees");

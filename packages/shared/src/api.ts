@@ -489,6 +489,154 @@ export type SummarizeTicketResponse = z.infer<
 >;
 
 /**
+ * How many days of arrivals the dashboard's trend chart covers.
+ *
+ * One constant for the SQL window, the chart's bar count and the sentence that
+ * says "30 days", for the reason `TICKET_PAGE_SIZE` is one: three numbers that
+ * have to match are three numbers that drift, and the one that drifts silently
+ * here is the label — a chart of 30 bars captioned "the last 14 days" is wrong
+ * in a way nobody can see.
+ */
+export const TICKET_TREND_DAYS = 30;
+
+/** `YYYY-MM-DD`, the calendar day in the zone the counts were bucketed by. */
+const calendarDaySchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Expected a YYYY-MM-DD date.");
+
+/**
+ * One day's arrivals: tickets whose `created_at` falls on this calendar day.
+ *
+ * A bare date rather than a timestamp, and that is the whole point of the
+ * bucketing — the server has already decided which day each ticket belongs to,
+ * because only the server knows the zone that decision was made in. A
+ * timestamp here would invite the browser to re-derive the day and land on a
+ * different one.
+ */
+export const ticketsPerDaySchema = z.object({
+  date: calendarDaySchema,
+  count: z.number().int().nonnegative(),
+});
+export type TicketsPerDay = z.infer<typeof ticketsPerDaySchema>;
+
+/**
+ * Is this a zone Postgres and `Intl` will both accept?
+ *
+ * Validated here rather than left to the database, because an unknown zone
+ * reaches `timezone(?, …)` as a runtime error — a 500 blaming this API for a
+ * caller's typo. `Intl` throws a `RangeError` for anything its tz database does
+ * not know, which is the same IANA database Postgres ships, so this is the
+ * cheapest check that agrees with the thing that will actually run.
+ */
+function isTimeZone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Query params for `GET /api/stats`.
+ *
+ * **`tz` exists because "tickets per day" has no answer without one.** A day is
+ * a range of instants and which range depends on where you are standing:
+ * bucketing in UTC puts a ticket that arrived at 9pm in Tehran on the following
+ * day, so an agent's busiest evening shows up on a bar labelled tomorrow and
+ * today's bar is missing its last few hours. The reader's own zone is the only
+ * one under which the chart says what it appears to say.
+ *
+ * Defaulted to UTC rather than required, so a `curl` still works and so a
+ * browser that reports no zone gets a defined answer rather than a 400. The SPA
+ * always sends one.
+ */
+export const ticketStatsQuerySchema = z.object({
+  tz: z.string().refine(isTimeZone, "Unknown time zone.").default("UTC"),
+});
+export type TicketStatsQuery = z.infer<typeof ticketStatsQuerySchema>;
+
+/**
+ * The dashboard's numbers, in one response.
+ *
+ * Counts rather than percentages and rates, on purpose. A percentage is a
+ * division, and a division shipped over the wire is a second place the
+ * numerator and denominator can be chosen — so a tile reading "38% resolved by
+ * AI" beside tiles reading 100 and 38 could disagree with them and nothing on
+ * screen would say which was wrong. The SPA derives the share from `aiResolved`
+ * and `total`, which is the only reading that can be checked against the tiles
+ * next to it.
+ *
+ * Unfiltered, and that is the point of a dashboard as opposed to the queue.
+ * `GET /api/tickets` defaults `handledBy` to `human` and therefore hides the
+ * assistant's tickets; counting what it returns would answer "how many tickets
+ * has the AI resolved" with a number that excludes exactly those. These counts
+ * are over the whole table.
+ */
+export const ticketStatsSchema = z.object({
+  /** Every ticket ever ingested, whoever handled it and whatever became of it. */
+  total: z.number().int().nonnegative(),
+  /** `status = 'open'` — the work outstanding, including what the assistant is mid-way through. */
+  open: z.number().int().nonnegative(),
+  /** `status = 'resolved'`, however it got there: by a person or by the assistant. */
+  resolved: z.number().int().nonnegative(),
+  /**
+   * `auto_resolution = 'resolved'` — the assistant answered the student from
+   * the knowledge base and closed the ticket behind it.
+   *
+   * Read off `autoResolution` rather than `status`, because the two answer
+   * different questions and only this one is about the assistant. A ticket the
+   * assistant resolved and a colleague then reopened is no longer `resolved`
+   * and was still resolved by the AI; a ticket a person closed by hand is
+   * `resolved` and was not.
+   */
+  aiResolved: z.number().int().nonnegative(),
+  /**
+   * `auto_resolution = 'escalated'` — the assistant read the ticket and handed
+   * it back. Here so `aiResolved` has something to be a share *of*: a
+   * resolution rate with no view of the refusals is a number that cannot be
+   * told from an assistant nobody ever asked.
+   */
+  aiEscalated: z.number().int().nonnegative(),
+  /**
+   * Mean seconds from `created_at` to `resolved_at`, over the tickets that
+   * carry both.
+   *
+   * Null rather than 0 when nothing qualifies, because "no ticket has been
+   * resolved yet" and "every ticket was resolved instantly" are opposite facts
+   * and 0 is how a dashboard states the second one by accident.
+   */
+  averageResolutionSeconds: z.number().nonnegative().nullable(),
+  /**
+   * How many tickets that average was taken over.
+   *
+   * It is not `resolved` and it is not `total`: `resolved_at` is only recorded
+   * from the migration that added the column onward, so every ticket resolved
+   * before it reads as null and is excluded. Shipping the sample size is what
+   * lets the page say "across 12 tickets" instead of presenting an average of
+   * twelve as an average of the whole queue.
+   */
+  resolutionSampleSize: z.number().int().nonnegative(),
+  /**
+   * Arrivals per calendar day over the last `TICKET_TREND_DAYS` days, oldest
+   * first, in the zone named by the request's `tz`.
+   *
+   * **Always exactly `TICKET_TREND_DAYS` entries, including the empty days.**
+   * A `GROUP BY` answers only about days that have rows, so a quiet weekend
+   * would arrive as two missing entries and a 30-bar chart would draw 28 — not
+   * as a visible gap, but by sliding every later bar left onto the wrong date.
+   * The zero-fill is the server's job because the response has to be a complete
+   * statement about the window it names.
+   *
+   * On the same response as the counts above rather than behind its own route,
+   * so a reader gets one screen describing one moment. Two requests would be
+   * two moments, and the version that ships is the one where they disagree.
+   */
+  daily: z.array(ticketsPerDaySchema),
+});
+export type TicketStats = z.infer<typeof ticketStatsSchema>;
+
+/**
  * Who a ticket may be assigned to: every staff account that has not been
  * deleted, in one unpaginated list.
  *

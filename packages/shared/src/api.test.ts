@@ -4,6 +4,7 @@ import {
   createUserBodySchema,
   inboundEmailBodySchema,
   listTicketsQuerySchema,
+  ticketStatsQuerySchema,
   updateUserBodySchema,
 } from "./api.ts";
 
@@ -263,6 +264,38 @@ describe("listTicketsQuerySchema handledBy", () => {
   it("refuses a handler that is not one of the three", () => {
     expect(
       listTicketsQuerySchema.safeParse({ handledBy: "robot" }).success,
+    ).toBe(false);
+  });
+});
+
+/**
+ * The dashboard's time zone, which decides which calendar day each ticket is
+ * counted on. It reaches Postgres as an argument to `timezone(…)`, so an
+ * unchecked value is a 500 rather than a 400 — and a *wrong* one is worse than
+ * either, because the chart still renders and every bar is off by a day.
+ */
+describe("ticketStatsQuerySchema", () => {
+  it("defaults to UTC so a caller that names no zone still gets one", () => {
+    expect(ticketStatsQuerySchema.parse({}).tz).toBe("UTC");
+  });
+
+  it("accepts an IANA zone", () => {
+    expect(ticketStatsQuerySchema.parse({ tz: "Asia/Tehran" }).tz).toBe(
+      "Asia/Tehran",
+    );
+  });
+
+  /**
+   * The check is `Intl`'s, which reads the same IANA database Postgres ships —
+   * so anything that passes here is a zone the query can actually use.
+   */
+  it("refuses something that is not a zone", () => {
+    expect(
+      ticketStatsQuerySchema.safeParse({ tz: "Mars/Olympus_Mons" }).success,
+    ).toBe(false);
+    expect(
+      ticketStatsQuerySchema.safeParse({ tz: "'; drop table ticket --" })
+        .success,
     ).toBe(false);
   });
 });

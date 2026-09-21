@@ -101,6 +101,14 @@ function MainNav() {
       <NavLink to="/" end className={navLinkClass}>
         Tickets
       </NavLink>
+      {/*
+       * No `end`: /dashboard has no children, so there is nothing for the
+       * active state to over-match — unlike the queue above, which every other
+       * route nests under.
+       */}
+      <NavLink to="/dashboard" className={navLinkClass}>
+        Dashboard
+      </NavLink>
       {session.user.role === "admin" && (
         <NavLink to="/users" className={navLinkClass}>
           Users

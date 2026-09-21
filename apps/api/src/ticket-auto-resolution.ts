@@ -354,7 +354,17 @@ export function createAutoResolutionStore(db: Database): AutoResolutionStore {
         // the transition here.
         const [claimed] = await tx
           .update(ticket)
-          .set({ status: "resolved", autoResolution: "resolved" })
+          .set({
+            status: "resolved",
+            autoResolution: "resolved",
+            // The other half of what `PATCH /api/tickets/:id` writes on a move
+            // out of `open`, and it has to be written here too or the
+            // dashboard's average resolution time is an average of the tickets
+            // people got to first — the assistant's, which are the fast ones,
+            // would resolve without ever recording when. `claimable` pins the
+            // current status to `open`, so this is always a first stamp.
+            resolvedAt: new Date(),
+          })
           .where(claimable(job.id))
           .returning({ id: ticket.id });
 

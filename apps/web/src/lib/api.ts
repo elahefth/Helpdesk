@@ -11,6 +11,7 @@ import {
   readinessSchema,
   summarizeTicketResponseSchema,
   ticketDetailSchema,
+  ticketStatsSchema,
   updateUserResponseSchema,
   type CreateTicketReplyBody,
   type CreateTicketReplyResponse,
@@ -28,6 +29,7 @@ import {
   type Readiness,
   type SummarizeTicketResponse,
   type TicketDetail,
+  type TicketStats,
   type UpdateTicketBody,
   type UpdateTicketResponse,
   type UpdateUserBody,
@@ -223,6 +225,41 @@ export function summarizeTicket(id: string): Promise<SummarizeTicketResponse> {
     `/api/tickets/${encodeURIComponent(id)}/summary`,
     summarizeTicketResponseSchema,
     { method: "POST" },
+  );
+}
+
+/**
+ * The browser's IANA time zone, or `undefined` if it will not say.
+ *
+ * The daily chart needs it: a day is a range of instants, and which range
+ * depends on where the reader is standing. Bucketing server-side in UTC would
+ * file a ticket that arrived at 9pm in Tehran under the following day, so an
+ * agent's busiest evening lands on tomorrow's bar and today's is short.
+ *
+ * `undefined` rather than a guess when `Intl` gives nothing, so the parameter is
+ * dropped and the server applies its own documented default. Fabricating "UTC"
+ * here would say the same thing in a way that looks like the reader asked for
+ * it.
+ */
+function readerTimeZone(): string | undefined {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+}
+
+/**
+ * The dashboard's counts, over the whole ticket table.
+ *
+ * Deliberately not derived from `listTickets`: that call defaults `handledBy`
+ * to `human`, so its `total` is the work a person still has to do — counting it
+ * would answer "how many tickets has the AI resolved" with a number chosen to
+ * exclude them. These are server-side aggregates over every row.
+ *
+ * Open to every signed-in agent, like `listAssignees` and unlike the user
+ * routes, so the page needs no role guard.
+ */
+export function getTicketStats(): Promise<TicketStats> {
+  return request(
+    `/api/stats${toQueryString({ tz: readerTimeZone() })}`,
+    ticketStatsSchema,
   );
 }
 

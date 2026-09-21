@@ -162,12 +162,26 @@ for (const [index, fixture] of TICKET_FIXTURES.entries()) {
   // everything else because the column carries an `$onUpdate` — leaving it out
   // would have Drizzle stamp it with now() and undo the point of the exercise.
   const createdAt = receivedAt;
+  const updatedAt = updatedAtFor(createdAt, fixture.status, index);
   await db
     .update(ticket)
     .set({
       status: fixture.status,
       createdAt,
-      updatedAt: updatedAtFor(createdAt, fixture.status, index),
+      updatedAt,
+      /**
+       * The same moment as `updatedAt`, which is not a coincidence: for a
+       * fixture that is resolved or closed, the backdated `updatedAt` *is* the
+       * moment `updatedAtFor` invented for the work finishing. Nothing has
+       * touched these rows since.
+       *
+       * Left null for the open ones, like the column's own rule. Without this
+       * the dashboard's resolution average would have no sample at all in a
+       * freshly seeded database — a hundred resolved tickets and "not enough
+       * data", which reads as a broken tile rather than as a corpus that
+       * predates the column.
+       */
+      resolvedAt: fixture.status === "open" ? null : updatedAt,
     })
     .where(eq(ticket.sourceMessageId, body.messageId!));
 
