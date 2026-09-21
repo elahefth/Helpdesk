@@ -136,8 +136,18 @@ async function emailConflict(db: Database, email: string): Promise<HttpError> {
  * `auth.$context` resolves the same adapter and hasher the HTTP endpoints use,
  * so a password set here verifies against the login form without this repo
  * carrying a second implementation of the hash anywhere.
+ *
+ * Exported for `dev/reset-password.ts`, the out-of-band way back into an
+ * account whose password nobody knows. That script is the *only* other caller,
+ * and it imports this rather than re-deriving the hash for the reason the
+ * paragraph above gives: two implementations of a password write is one that
+ * silently stops matching the login form.
  */
-async function setStaffPassword(auth: Auth, userId: string, password: string) {
+export async function setStaffPassword(
+  auth: Auth,
+  userId: string,
+  password: string,
+) {
   const ctx = await auth.$context;
   const hashed = await ctx.password.hash(password);
   const accounts = await ctx.internalAdapter.findAccounts(userId);

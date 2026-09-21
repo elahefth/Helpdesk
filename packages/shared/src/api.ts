@@ -398,6 +398,52 @@ export type PolishTicketReplyResponse = z.infer<
 >;
 
 /**
+ * How long a generated summary may be.
+ *
+ * Short by design, and the number is a policy rather than a guess: a summary
+ * that runs to a page is one an agent skims instead of reading, which is the
+ * one failure mode that makes the button worse than useless — it would be
+ * quicker to read the ticket. The model is told to be brief and this is what
+ * happens when it is not, so it is a ceiling the API refuses at rather than a
+ * hint it rounds off.
+ *
+ * Note the neighbour it is easy to confuse: `ticketSummarySchema` above is a
+ * ticket's *list row* and has nothing to do with this. That name predates the
+ * feature, and renaming it would touch the queue, its cursor and both test
+ * suites for a word.
+ */
+export const TICKET_SUMMARY_MAX_LENGTH = 2_000;
+
+/**
+ * POST /api/tickets/:id/summary — what a language model made of the ticket and
+ * everything said on it since.
+ *
+ * **The request carries no body, and that is the design decision here.** The
+ * material is the ticket's email plus its whole reply thread, and the server
+ * already holds both; a body would let a caller hand in text of their own and
+ * be answered with a summary of something that is not on the ticket. It is the
+ * mirror image of `polishTicketReplyBodySchema`, where the draft is the point
+ * and only the agent has it.
+ *
+ * Nothing is stored. Each press regenerates — there is no `summarizedAt`
+ * column, no cache key, and a second press on a thread that has grown by one
+ * reply is expected to answer differently. A stored summary would need
+ * invalidating every time anyone replied, and a stale one is worse than none:
+ * it is wrong in exactly the way nobody checks.
+ *
+ * A separate request from the ticket rather than a field on
+ * `ticketDetailSchema`, for the reason the thread is one — a summary costs a
+ * model call, and putting it on that shape would mean paying for one every time
+ * someone changed a status.
+ */
+export const summarizeTicketResponseSchema = z.object({
+  summary: z.string().max(TICKET_SUMMARY_MAX_LENGTH),
+});
+export type SummarizeTicketResponse = z.infer<
+  typeof summarizeTicketResponseSchema
+>;
+
+/**
  * Who a ticket may be assigned to: every staff account that has not been
  * deleted, in one unpaginated list.
  *

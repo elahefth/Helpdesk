@@ -396,6 +396,44 @@ describe("TicketDetailPage", () => {
   });
 
   /**
+   * Where the summary button sits is the requirement, not a detail: it is a
+   * thing you press having read the email, about the email and everything under
+   * it. Asserted as document order rather than containment — unlike
+   * AppLayout.test.tsx, where the header is `justify-between` and order says
+   * nothing — because here the page is one column and the order *is* the
+   * reading order.
+   */
+  it("offers a summary between the message and the replies", async () => {
+    serve(ticket());
+
+    renderDetail();
+    await screen.findByRole("heading", { name: /Cannot log in/ });
+
+    const summarize = screen.getByRole("button", { name: "Summarize" });
+    const message = screen.getByText("Message");
+    const replies = screen.getByRole("heading", { name: "Replies" });
+
+    // `compareDocumentPosition` returns FOLLOWING (4) when the argument comes
+    // after the node it is called on.
+    expect(message.compareDocumentPosition(summarize) & 4).toBe(4);
+    expect(summarize.compareDocumentPosition(replies) & 4).toBe(4);
+  });
+
+  /**
+   * A summary costs a model call, so opening a ticket must not spend one —
+   * pinned here as well as in TicketSummaryCard.test.tsx because this is the
+   * mount that would pay for it.
+   */
+  it("summarizes nothing until asked", async () => {
+    serve(ticket());
+
+    renderDetail();
+    await screen.findByRole("heading", { name: /Cannot log in/ });
+
+    expect(requests).not.toContain(`POST ${TICKET_PATH}/summary`);
+  });
+
+  /**
    * The queue and this page are two cache entries, and a change made here shows
    * in both. Nothing refetches while this page is open — the queue is unmounted
    * and its queries are inactive — so the row is marked stale instead, and
@@ -744,9 +782,7 @@ describe("TicketDetailPage", () => {
       expect(
         await screen.findByRole("option", { name: "Cass Agent" }),
       ).toBeDefined();
-      expect(
-        screen.queryByRole("option", { name: "Eve Former" }),
-      ).toBeNull();
+      expect(screen.queryByRole("option", { name: "Eve Former" })).toBeNull();
     });
   });
 });

@@ -9,6 +9,7 @@ import {
   listUsersResponseSchema,
   polishTicketReplyResponseSchema,
   readinessSchema,
+  summarizeTicketResponseSchema,
   ticketDetailSchema,
   updateUserResponseSchema,
   type CreateTicketReplyBody,
@@ -25,6 +26,7 @@ import {
   type PolishTicketReplyBody,
   type PolishTicketReplyResponse,
   type Readiness,
+  type SummarizeTicketResponse,
   type TicketDetail,
   type UpdateTicketBody,
   type UpdateTicketResponse,
@@ -197,6 +199,30 @@ export function polishTicketReply(
     `/api/tickets/${encodeURIComponent(id)}/replies/polish`,
     polishTicketReplyResponseSchema,
     { method: "POST", body: JSON.stringify(body) },
+  );
+}
+
+/**
+ * Ask a language model what this ticket and its replies amount to.
+ *
+ * POST for something that reads, which looks wrong until you notice what a GET
+ * would license: a browser, a proxy and React Query all treat one as free to
+ * repeat and safe to cache, and here every repeat is a model call somebody pays
+ * for and a fresh answer. There is no body — the server has the ticket and the
+ * thread, and taking text from the caller would make this a summariser of
+ * anything rather than of this ticket.
+ *
+ * Nothing is stored, so there is nothing to invalidate and nothing to go stale:
+ * each call summarises the ticket as it stands when it is asked.
+ *
+ * A 503 means the server has no model configured, a 502 that the model failed —
+ * both carrying a message the API writes to be shown as-is.
+ */
+export function summarizeTicket(id: string): Promise<SummarizeTicketResponse> {
+  return request(
+    `/api/tickets/${encodeURIComponent(id)}/summary`,
+    summarizeTicketResponseSchema,
+    { method: "POST" },
   );
 }
 

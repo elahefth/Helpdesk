@@ -11,14 +11,17 @@ import {
   type ListTicketRepliesResponse,
   type ListTicketsResponse,
   type PolishTicketReplyResponse,
+  type SummarizeTicketResponse,
   type TicketDetail,
+  type TicketReply,
   type UpdateTicketResponse,
 } from "@helpdesk/shared";
+import { ModelError } from "../ai/openrouter.ts";
+import { createReplyPolisher, type ReplyPolisher } from "../ai/polish-reply.ts";
 import {
-  createReplyPolisher,
-  ReplyPolishError,
-  type ReplyPolisher,
-} from "../ai/polish-reply.ts";
+  createTicketSummarizer,
+  type TicketSummarizer,
+} from "../ai/summarize-ticket.ts";
 import type { Database } from "../db/client.ts";
 import { ticket, ticketReply, user } from "../db/schema.ts";
 import { HttpError } from "../middleware/errors.ts";
@@ -119,6 +122,41 @@ async function findTicketDetail(
 }
 
 /**
+ * One ticket's replies, oldest first, with each author resolved.
+ *
+ * `innerJoin`, unlike `findTicketDetail`'s left join to the assignee, and the
+ * difference is the column: `author_id` is NOT NULL, so an inner join loses
+ * nothing and is what types the author non-nullable all the way out to the
+ * response. It deliberately does not filter `user.deletedAt` for the same
+ * reason the assignee join does not — a departed colleague keeps their byline,
+ * because the alternative is a thread that quietly loses track of who said
+ * what.
+ *
+ * Shared by the thread route and the summariser, so the two cannot drift into
+ * disagreeing about what "the conversation" is: a summary that saw a different
+ * set of replies than the page below it would be wrong in the one way nobody
+ * checks, since the reader is looking at the summary precisely to avoid
+ * reading the thread.
+ */
+async function findTicketReplies(
+  db: Database,
+  id: string,
+): Promise<TicketReply[]> {
+  const rows = await db
+    .select({ reply: ticketReply, author: user })
+    .from(ticketReply)
+    .innerJoin(user, eq(user.id, ticketReply.authorId))
+    .where(eq(ticketReply.ticketId, id))
+    // Ascending, because a thread is read top to bottom, and tiebroken by id
+    // for the reason the queue's cursor is: two replies written in the same
+    // millisecond are otherwise ordered by whatever the plan produced, and a
+    // conversation that reshuffles between reloads reads as a bug.
+    .orderBy(asc(ticketReply.createdAt), asc(ticketReply.id));
+
+  return rows.map((row) => toTicketReply(row.reply, toUser(row.author)));
+}
+
+/**
  * A factory over the database handle, like `createUsersRouter`. It was a
  * module-level const while the list was a fixture; it reads real rows now, so
  * it takes the handle and answers for its absence.
@@ -132,6 +170,8 @@ export function createTicketsRouter(
    * `undefined` when no key is configured, which the route answers for.
    */
   polishReply: ReplyPolisher | undefined = createReplyPolisher(),
+  /** The ticket summariser, on the same terms as the polisher above. */
+  summarizeTicket: TicketSummarizer | undefined = createTicketSummarizer(),
 ): Router {
   const router = Router();
 
@@ -350,19 +390,8 @@ export function createTicketsRouter(
       .limit(1);
     if (!exists) throw HttpError.notFound(`Ticket ${id.data} not found`);
 
-    const rows = await db
-      .select({ reply: ticketReply, author: user })
-      .from(ticketReply)
-      .innerJoin(user, eq(user.id, ticketReply.authorId))
-      .where(eq(ticketReply.ticketId, id.data))
-      // Ascending, because a thread is read top to bottom, and tiebroken by id
-      // for the reason the queue's cursor is: two replies written in the same
-      // millisecond are otherwise ordered by whatever the plan produced, and a
-      // conversation that reshuffles between reloads reads as a bug.
-      .orderBy(asc(ticketReply.createdAt), asc(ticketReply.id));
-
     const body: ListTicketRepliesResponse = {
-      data: rows.map((row) => toTicketReply(row.reply, toUser(row.author))),
+      data: await findTicketReplies(db, id.data),
     };
 
     res.json(body);
@@ -499,7 +528,7 @@ export function createTicketsRouter(
     } catch (error) {
       // Only the polisher's own failures are translated. Anything else is a bug
       // in this API and belongs in the 500 the error handler gives it.
-      if (!(error instanceof ReplyPolishError)) throw error;
+      if (!(error instanceof ModelError)) throw error;
 
       // Logged with the cause, which is where the provider's own message lives;
       // the client gets `error.message`, which is written to be safe to render.
@@ -510,6 +539,79 @@ export function createTicketsRouter(
     // 200, not 201: nothing was created. The draft in the box is still the only
     // copy, and it is still the agent's.
     const body: PolishTicketReplyResponse = { body: polished };
+    res.json(body);
+  });
+
+  /**
+   * Summarise the ticket and everything said on it, and write nothing.
+   *
+   * **POST for a read, deliberately.** Nothing is created and nothing is
+   * stored, so GET is the verb this looks like — and GET is the one thing it
+   * must not be: a GET is what a browser, a proxy and React Query all treat as
+   * free to repeat and safe to cache, and each repeat is a model call this
+   * install pays for and a *different* answer. POST says the two things that
+   * are true here: asking again costs something, and asking again is the point.
+   *
+   * **It is regenerated every time, and there is no store to read instead.**
+   * The alternative — a `summary` column filled on the first press — has to be
+   * invalidated by every reply, every status change and every edit, and the
+   * version of that which ships is the one where it silently is not: a summary
+   * describing a ticket as it stood four replies ago, presented with the same
+   * confidence as a fresh one. The reader cannot tell those apart, which is
+   * what makes a stale summary worse than no summary.
+   *
+   * The body is not read at all. The material is the ticket plus its thread,
+   * both of which this route fetches — see `summarizeTicketResponseSchema` for
+   * why taking text from the caller would be a different, worse endpoint.
+   *
+   * Open to any signed-in staff member, like the thread it summarises. Unlike
+   * the polisher there is no `req.user` guard, because nothing here is signed:
+   * a summary names the people in the thread, never the person reading it.
+   */
+  router.post("/tickets/:id/summary", async (req, res) => {
+    const id = ticketSummarySchema.shape.id.safeParse(req.params.id);
+    if (!id.success) throw HttpError.badRequest("Malformed ticket id");
+
+    // 503 rather than 404, and the message names what is missing: this route
+    // exists, and the install simply has no model configured. The same answer
+    // the polisher gives, because it is the same missing key.
+    if (!summarizeTicket) {
+      throw HttpError.serviceUnavailable(
+        "Ticket summaries are not configured on this server.",
+      );
+    }
+
+    if (!db) throw HttpError.serviceUnavailable("Database unavailable");
+
+    // Read before the model is called, so a dead link costs nothing. The 404
+    // comes from the ticket rather than the thread — an empty thread is an
+    // ordinary ticket nobody has answered yet, and summarising one is exactly
+    // what a colleague picking it up wants.
+    const detail = await findTicketDetail(db, id.data);
+    if (!detail) throw HttpError.notFound(`Ticket ${id.data} not found`);
+
+    const replies = await findTicketReplies(db, id.data);
+
+    req.log.debug(
+      { ticketId: id.data, replies: replies.length },
+      "summarizing a ticket",
+    );
+
+    let summary: string;
+    try {
+      summary = await summarizeTicket(detail, replies);
+    } catch (error) {
+      // Only the model's own failures are translated. Anything else is a bug in
+      // this API and belongs in the 500 the error handler gives it.
+      if (!(error instanceof ModelError)) throw error;
+
+      // Logged with the cause, which is where the provider's own message lives;
+      // the client gets `error.message`, which is written to be safe to render.
+      req.log.warn({ err: error }, "ticket summarisation failed");
+      throw HttpError.badGateway(error.message);
+    }
+
+    const body: SummarizeTicketResponse = { summary };
     res.json(body);
   });
 

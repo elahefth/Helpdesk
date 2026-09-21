@@ -31,6 +31,10 @@ bun run email:send     # deliver a fixture email to the running API -> one ticke
                        # -- --from=… --from-name=… --subject=… --text=… --category=…
 bun run seed:tickets   # load the 100-ticket corpus (needs `bun run dev:api` up)
                        # -- --reset   to clear the table first; idempotent otherwise
+bun run seed:replies   # put a 20-message conversation on one ticket
+                       # -- --ticket=<uuid> [--agent=<email>] [--reset]
+bun run reset:password # set a staff password out of band (forgotten admin)
+                       # -- --email=… --password=…
 
 bun run e2e:install    # one-time: download the Chromium build
 bun run db:up:test     # test Postgres on :5433 (see below)
@@ -122,7 +126,8 @@ Staff-only console: students never log in. Sessions live in the `session` table 
 
 - **HTTP sign-up is closed** via `databaseHooks.user.create.before` in `apps/api/src/auth.ts`, which throws when `ctx.request` exists. `disableSignUp` is deliberately not used because it would also block in-process `auth.api.signUpEmail()`, leaving no way to create the first user. In-process calls have no `ctx.request`, which is the seam `seed.ts` uses.
 - **`role` is `input: false`**, so no HTTP payload can grant `admin`. `seed.ts` sets the role with a direct `UPDATE` after sign-up.
-- `seed.ts` is idempotent and **never changes an existing account's password** — re-running only corrects the role. There is no password-reset path in the repo.
+- `seed.ts` is idempotent and **never changes an existing account's password** — re-running only corrects the role. Overwriting one is a deliberate act, so it has its own command rather than a flag here: `bun run reset:password -- --email=… --password=…` (`apps/api/src/dev/reset-password.ts`).
+- **`reset:password` is the way back in when the last admin forgets theirs.** There is no reset *in the console*, and deliberately: no mail provider means no reset link, and an unauthenticated reset endpoint without one is a way to lock people out rather than a way in. `PATCH /api/users/:id` is the in-app answer and it is admin-gated, which leaves exactly one hole — the last admin — and nobody left to reach the route that fixes it. So the way back in is the way the first account was made: in-process, from a shell on the machine holding the database, which is the same trust boundary `seed.ts` already runs on. It calls `setStaffPassword` from `routes/users.ts` rather than hashing its own — two implementations of a password write is one that silently stops matching the login form — and it deletes the account's sessions for the same reason that route does. It **refuses a soft-deleted account** instead of writing anyway: `databaseHooks.session.create.before` turns one away at sign-in whatever its password is, so a write there would report success and change nothing observable.
 - **`POST /api/users` is the second door**, and the only one over HTTP: admin-gated, and it reaches Better Auth through the same in-process seam (`auth.api.signUpEmail({ body })` with no `headers`/`request` — forwarding the Express `req` would trip the gate above and answer "Sign up is disabled"). Accounts it creates are always `agent`, because `role` is `input: false`. Two consequences worth knowing before touching it: `emailAndPassword.autoSignIn` must stay on, since turning it off switches Better Auth's duplicate-email reply to a *synthetic* user and the route would report success while creating nothing; and because it is on, sign-up writes a session row for an account nobody has signed into, which the route deletes to keep "a session row means someone is signed in" true.
 - **`PATCH /api/users/:id` edits one**, admin-gated the same way. Name and email are plain columns and are written with Drizzle; the password is not, and goes through `auth.$context` (`password.hash` + `internalAdapter.updatePassword`, creating the `credential` row if one is somehow missing). That mirrors what Better Auth's admin plugin does in `setUserPassword` — mirrored rather than adopted, because enabling that plugin to reach one function would also mount `/api/admin/*`: set-role, ban, impersonate. Three things about it are load-bearing. **A blank or whitespace-only password means "leave it alone"**, normalised to `undefined` by `updateUserBodySchema` so the route has one case to branch on. **A password change deletes the target's session rows**, including the admin's own when they edit themselves — otherwise resetting a compromised account leaves the intruder holding a valid multi-day cookie, and no `cookieCache` is exactly what makes deleting rows sufficient. **The two writes are not atomic** (Better Auth's adapter holds its own handle), so the row is written *first*: a failed password write leaves a retryable state, whereas the reverse order could answer a duplicate-email 409 after the password had already changed.
 - **`DELETE /api/users/:id` is a soft delete**, admin-gated, and **admin accounts are exempt** — the route answers 403 for a target whose role is `admin`, which is the actual rule; the SPA merely omits the button. The row survives because `session` and `account` cascade from it and because past work — a reply's byline, a resolved ticket — still has to name whoever did it. Ownership is the part that does not survive: the same transaction clears `ticket.assigned_to_id` for every ticket the account owned, because an assignee is a claim on work nobody is going to do once its owner cannot sign in. Three things enforce what "deleted" means, and all three are load-bearing: every read in `routes/users.ts` carries `isNull(user.deletedAt)` (so a marked row is unlistable *and* uneditable), `databaseHooks.session.create.before` in `auth.ts` refuses the account a new session, and `requireAuth` refuses one that still holds an old one. Guarding `/sign-in/email` instead of the session insert would have left every future credential or social route open by default. The hook throws Better Auth's own `INVALID_EMAIL_OR_PASSWORD` verbatim so a deleted account is indistinguishable from a wrong password. Unlike PATCH's password write, all three statements here are Drizzle's, so they share a **transaction** — marking the row without clearing sessions would leave a deleted account signed in until its cookie expired, and releasing the tickets without marking the row would hand a working account's queue away.
@@ -300,18 +305,68 @@ member of staff said back.
   the SPA invalidating `["tickets"]` on a successful reply.
 - **A reply is immutable**: no `updated_at` column and no edit or delete route.
   Add the column when there is an editor to justify it.
+- **`bun run seed:replies` is how a long thread gets into a dev database**
+  (`dev/seed-replies.ts`, `dev/reply-fixtures.ts`). Twenty committed messages —
+  ten from the agent, ten from the student, strictly alternating and at least
+  ten lines each — walked forward from the ticket's own `createdAt` on
+  irregular gaps. `reply-fixtures.test.ts` pins all of that, because each
+  property fails as a thread that renders perfectly and exercises nothing. The
+  arc deliberately leaves questions open and ends on an unanswered one, which
+  is what gives the summariser something to put under "Outstanding".
+- **It seeds the student's half through a soft-deleted stand-in `user` row, and
+  that is worth understanding before touching it.** `ticket_reply.author_id` is
+  NOT NULL and references `user`, so this schema *cannot* store a message from
+  a student — the point made above, from the other side. A stand-in is the only
+  way to seed an alternating conversation without building the message table,
+  and a deleted one is the safe kind: `GET /api/assignees` and `GET /api/users`
+  both filter `deletedAt` so it can never be assigned a ticket or listed, the
+  session hook refuses it a login, and it is created with no `account` row so
+  there is no password to try. Meanwhile the thread's own query inner-joins
+  `user` *without* filtering `deletedAt` — the rule that keeps a departed
+  colleague's byline — which is exactly what makes the student's turns render.
+  Its email is namespaced `student.<address>` because `user.email` is UNIQUE
+  and a deleted row keeps its address: without the prefix, a real student who
+  later joined the staff could not be created, and the 409 would blame a
+  deleted user nobody could find. The honest limitation is that the **SPA
+  cannot tell the two apart** — there is no direction column, so a student's
+  turn renders in the same card as an agent's and the thread reads as a
+  conversation because of the names and the words, not because the app knows.
+  Rendering a real inbound/outbound distinction is the schema change this
+  deliberately does not make.
+- **It writes with Drizzle rather than through `POST …/replies`**, unlike
+  `seed-tickets.ts`, which posts to the real endpoint. Two reasons, both hard:
+  that route takes its author from the session, which is the whole point of it
+  and something a student can never have; and every fixture is deliberately in
+  the past, while the route stamps `now()`. It leaves `ticket.updatedAt` alone
+  for the reason the route does — `$onUpdate` plus the queue's default sort
+  means touching it would jump a seeded ticket to the top of the queue.
 - **The SPA appends the response rather than invalidating**, the opposite of
   what the sidebar does with the queue: the POST answers with the new row in the
   shape the list holds, so an invalidate would round-trip for something already
   in hand and blank the conversation while it did. The cost is a colleague's
   reply written in the meantime, which arrives on the next mount.
 
-### Reply polishing — the one place a model runs
+### Where a model runs
+
+Two features, one core. `apps/api/src/ai/openrouter.ts` holds everything about
+*reaching* a model — the fallback chain, the batching, the one shared deadline,
+the translation of a provider failure into a sentence an agent can act on — and
+exports `createTextGenerator()`, which is `undefined` when no key is configured.
+Each feature beside it owns only what makes it that feature: its instructions,
+its prompt, its temperature and its length ceiling. That split arrived with the
+summariser; everything under "Reply polishing" that is about the provider now
+lives in the core and is shared by both. A third feature should be a third
+prompt file, never a second copy of the batch walk — the trap in
+`OPENROUTER_MODELS_PER_REQUEST` below fails *every* request and reports itself
+as a generic call error, and a missed copy of it is a button that has never
+worked.
+
+### Reply polishing
 
 `POST /api/tickets/:id/replies/polish` and the **Polish** button beside Send on
 the reply form. An agent's shorthand goes to a language model through OpenRouter
 (Vercel's AI SDK, `apps/api/src/ai/polish-reply.ts`) and the finished email
-comes back into the box. It is the only AI in the repo.
+comes back into the box.
 
 - **It expands, and it does not answer**, which is the whole design of the
   prompt — and the first half is a correction. It shipped as a copy editor
@@ -394,11 +449,12 @@ comes back into the box. It is the only AI in the repo.
   a second, but one that *accepts* can take twenty, so a chain that walks past
   several refusals into a slow answer needs room a 30s ceiling did not leave —
   it turned requests that were about to succeed into 502s.
-- **The polisher's failures are 502, via `HttpError.badGateway`.** Distinct from
+- **A model's failures are 502, via `HttpError.badGateway`.** Distinct from
   500 (this API is broken) and 503 (a dependency is missing): the request was
-  fine and someone else's server was not. `ReplyPolishError` carries a message
-  written to be rendered as-is, and the provider's own error — which holds the
-  URL, the model id, sometimes a key prefix — stays on `cause` for the log line.
+  fine and someone else's server was not. `ModelError` (in `openrouter.ts`, and
+  thrown by both features) carries a message written to be rendered as-is, and
+  the provider's own error — which holds the URL, the model id, sometimes a key
+  prefix — stays on `cause` for the log line.
   `describeProviderFailure` picks that message by status, and the point is the
   reader's next move rather than accuracy for its own sake: 429 means press the
   button again shortly, 401/403 means fetch whoever holds the key, 404 means
@@ -409,10 +465,12 @@ comes back into the box. It is the only AI in the repo.
   filtered generation, and handing it back would silently blank a draft;
   over-length means the model started answering the student instead of editing,
   and truncating would put half of that in the box as if it were finished.
-  `unwrapModelReply` strips only the two unambiguous wrappers a small model adds
-  — a fence around the *whole* answer, and the prompt's own `<draft>` tags. A
-  leading "Here is your improved reply:" is deliberately left alone: it cannot
-  be told from a first sentence the agent wrote.
+  `unwrapModelText` strips only the unambiguous wrappers a small model adds — a
+  fence around the *whole* answer, and, when the caller names one, the prompt's
+  own tags echoed back (`<draft>` here; the summariser names none, because a
+  model that echoed `<ticket>` has not written a summary at all). A leading
+  "Here is your improved reply:" is deliberately left alone: it cannot be told
+  from a first sentence the agent wrote.
 - **`ticketReplyBodyField` in `packages/shared` is shared between the two
   writes**, a factory so each says its own thing about an empty box while the
   *ceiling* cannot drift — a draft the polisher accepted and the send route
@@ -425,6 +483,56 @@ comes back into the box. It is the only AI in the repo.
   unpolished draft with a click on the button meant to improve it — and the
   polisher's error renders separately from the form's `root`, so a failed
   polish never reads as a failed send.
+
+### Ticket summaries — the second model
+
+`POST /api/tickets/:id/summary` and the **Summarize** button under the student's
+email on the ticket detail page (`apps/api/src/ai/summarize-ticket.ts`,
+`apps/web/src/routes/TicketSummaryCard.tsx`). The ticket and its whole reply
+thread go to a model and a few lines come back saying what it is about and where
+it stands. It is the opposite job to the polisher next door — that one composes
+and runs warm, this one extracts and runs cold (0.2) — and the two share
+everything in `openrouter.ts` and nothing above it.
+
+- **It is regenerated on every press, and nothing is stored.** No `summary`
+  column, no cache entry, no `staleTime`. The alternative has to be invalidated
+  by every reply, every status change and every edit, and the version that ships
+  is the one where it silently is not: a summary describing the ticket as it
+  stood four replies ago, presented exactly like a fresh one. A reader cannot
+  tell those apart — they are looking at the summary precisely to avoid reading
+  the thread — which is what makes a stale summary worse than none. The card
+  shows the moment it was asked for, which is the other half of that contract.
+- **A mutation in the SPA, not a query**, and that is what keeps the cost
+  honest. A query would fire on mount, so every ticket anyone opened would spend
+  a model call whether or not they wanted a summary, and would then serve the
+  answer back while the thread grew underneath it. `TicketDetailPage.test.tsx`
+  pins that opening a ticket sends no `POST …/summary`.
+- **POST for something that reads.** GET is the verb this looks like and the one
+  it must not be: a browser, a proxy and React Query all treat a GET as free to
+  repeat and safe to cache, and here each repeat costs a model call and returns
+  a different answer. POST states both facts.
+- **The request carries no body, and the route never reads one.** The material
+  is the email plus the thread, both of which the server already holds. A body
+  would make this a summariser of whatever a caller sends wearing a ticket's
+  URL — the mirror image of the polish route, where the draft is the point and
+  only the agent has it. `app.test.ts` pins that a body changes nothing.
+- **The thread query is shared with `GET …/replies`** (`findTicketReplies` in
+  `routes/tickets.ts`). A summary built from a different set of replies than the
+  page below it would be wrong in the one way nobody checks.
+- **An empty thread is stated in the prompt, not omitted.** An absent block is
+  ambiguous and a model resolves the ambiguity confidently — "the team has
+  responded" about a ticket nobody has touched. Both blocks are fenced like the
+  polisher's, now over staff replies too, since a reply is free text typed by a
+  human like any other.
+- **The instructions forbid advising, recommending or deciding anything**, which
+  is the failure this prompt is built against: a model handed "I was charged
+  twice" wants to help, and produces "The student should be refunded within 5
+  working days" — a policy, in the helpdesk's voice, that nobody agreed to. An
+  unanswered question is reported as still unanswered, never answered.
+  `summarize-ticket.test.ts` pins those lines, because they fail as a button
+  that works.
+- **Nothing here is signed or sent**, so unlike the polisher the route needs no
+  `req.user`: a summary names the people in the thread, never its reader.
 
 ### Web
 
@@ -459,6 +567,8 @@ These guards hide UI; they are not the security boundary — the API is. Any adm
 The auth client sets no `baseURL`, so requests stay same-origin: in dev Vite proxies `/api`, `/healthz`, and `/readyz` to :3000, and in production the API serves the built SPA. The session cookie therefore never needs a cross-site exemption. `inferAdditionalFields` teaches the client about `role`, using values from `@helpdesk/shared` rather than `typeof auth` because `apps/web` must not depend on `apps/api`.
 
 The proxy target is `API_PROXY_TARGET`, defaulting to :3000. Only the E2E suite overrides it — do not hardcode a port back into `vite.config.ts`.
+
+**`strictPort: true` on the dev server, and it is load-bearing.** Vite's default is to take the next free port when 5173 is busy, which here is not a convenience but a broken app wearing a misleading error: the API pins both its CORS allowlist and Better Auth's `trustedOrigins` to `WEB_ORIGIN` (`http://localhost:5173`), and both compare the `Origin` header as a string — so a browser served from :5174 loads the page, renders the queue through the proxy, and has every sign-in refused with **403 `INVALID_ORIGIN`**. The message points at auth configuration when the fault is a second `bun run dev:web` somebody started and forgot. :5174 is also the E2E suite's own Vite port, so a drifted dev server sits exactly where the test server belongs. With `strictPort` the second server says "Port 5173 is already in use" and exits, which is the true statement. If you ever do need the SPA on another port, move `WEB_ORIGIN` with it — the two are one setting in two files.
 
 ### E2E (`e2e/`) runs on Node, against a second Postgres
 

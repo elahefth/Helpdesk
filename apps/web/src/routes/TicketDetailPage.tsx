@@ -19,6 +19,7 @@ import {
   listAssignees,
   updateTicket,
 } from "../lib/api.ts";
+import { TicketSummaryCard } from "./TicketSummaryCard.tsx";
 import { TicketThread } from "./TicketThread.tsx";
 import { useSession } from "../lib/auth-client.ts";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -208,6 +209,15 @@ function TicketView({ ticket }: { ticket: TicketDetail }) {
             <div className="whitespace-pre-wrap break-words">{ticket.body}</div>
           </CardContent>
         </Card>
+
+        {/*
+          Between the email and the thread, which is the only place it belongs:
+          it is about both of them, and a reader who wants the short version
+          wants it before the long one rather than after. It asks for nothing on
+          mount — see TicketSummaryCard for why a summary is a button and not a
+          query.
+        */}
+        <TicketSummaryCard ticketId={ticket.id} />
 
         {/*
           Under the email, inside the same article: the email is the first thing

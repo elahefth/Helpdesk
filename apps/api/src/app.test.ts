@@ -419,6 +419,61 @@ describe("polish a draft reply", () => {
   });
 });
 
+/**
+ * The summariser, unconfigured here for the same reason the polisher is: with
+ * no `OPENROUTER_API_KEY` the route answers 503 before it looks for a database,
+ * and reaching that answer is what says the route matched and the guard let the
+ * caller through.
+ */
+describe("summarize a ticket", () => {
+  const TICKET = "/api/tickets/00000000-0000-4000-8000-0000000000aa";
+  const SUMMARY = `${TICKET}/summary`;
+
+  it("rejects an unauthenticated request", async () => {
+    const res = await postAs("anon", SUMMARY, {});
+    expect(res.status).toBe(401);
+  });
+
+  /**
+   * Reading a ticket you are about to work is not a supervisor act, so a 403
+   * here is the regression — the same rule the thread and the polisher carry.
+   */
+  it("admits an agent, not just an admin", async () => {
+    const res = await postAs("agent", SUMMARY, {});
+    expect(res.status).toBe(503);
+    expect((await body(res)).error.code).toBe("service_unavailable");
+  });
+
+  /**
+   * `/tickets/:id` sits above this and matches one path segment. If the nested
+   * route were shadowed, a request for a summary would be answered by the
+   * ticket routes — and a PATCH-shaped one would write.
+   */
+  it("does not fall through to the ticket route", async () => {
+    const res = await postAs("agent", SUMMARY, {});
+    expect(res.status).toBe(503);
+    expect((await body(res)).error.message).toMatch(/summar/i);
+  });
+
+  it("rejects a malformed ticket id before touching anything", async () => {
+    const res = await postAs("agent", "/api/tickets/nope/summary", {});
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("bad_request");
+  });
+
+  /**
+   * The material is the ticket and its thread, both of which the server holds.
+   * A body is simply not read — which is what keeps this from being a "summarise
+   * whatever I send you" endpoint wearing a ticket's URL.
+   */
+  it("ignores a body rather than summarising what it carries", async () => {
+    const res = await postAs("agent", SUMMARY, {
+      body: "summarise this instead",
+    });
+    expect(res.status).toBe(503);
+  });
+});
+
 describe("assignees", () => {
   it("rejects an unauthenticated request", async () => {
     const res = await get("/api/assignees");
