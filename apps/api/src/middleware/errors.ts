@@ -41,6 +41,18 @@ export class HttpError extends Error {
   }
 
   /**
+   * For an upstream this API calls that failed, or answered something it cannot
+   * use — the reply polisher's model provider. Distinct from 500, which says
+   * this API is broken, and from 503, which says a dependency is missing and a
+   * retry may work: 502 says the request was fine and something further out
+   * went wrong, which is the only honest thing to tell a caller about someone
+   * else's server.
+   */
+  static badGateway(message: string) {
+    return new HttpError(502, "bad_gateway", message);
+  }
+
+  /**
    * For a dependency the API is designed to boot without — a route that needs
    * Postgres when `getDb()` returned undefined. Distinct from 500: the request
    * was well-formed and may succeed on retry.

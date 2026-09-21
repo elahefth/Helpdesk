@@ -11,6 +11,7 @@ import { TicketThread } from "./TicketThread.tsx";
 
 const TICKET_ID = "33333333-3333-4333-8333-333333333333";
 const REPLIES_PATH = `/api/tickets/${TICKET_ID}/replies`;
+const POLISH_PATH = `${REPLIES_PATH}/polish`;
 
 /**
  * `useSession` is mocked rather than driven through a stubbed fetch, for the
@@ -126,6 +127,7 @@ const render = () => renderWithQuery(<TicketThread ticketId={TICKET_ID} />);
 
 const box = () => screen.getByRole("textbox", { name: /your reply/i });
 const send = () => screen.getByRole("button", { name: /send reply/i });
+const polish = () => screen.getByRole("button", { name: /polish/i });
 
 describe("TicketThread", () => {
   it("lists the ticket's replies with who wrote each one and when", async () => {
@@ -269,25 +271,86 @@ describe("TicketThread", () => {
 
     /**
      * The same rule the API enforces, so the two cannot disagree about what an
-     * empty reply is — and nothing is sent, because a round trip to be told
-     * "write something first" is a round trip nobody needed.
+     * empty reply is — expressed as a disabled button rather than a message
+     * after the click, because "write something first" was never news to
+     * someone looking at the empty box it is written under.
+     *
+     * Whitespace counts as empty here because the schema trims: a Send offered
+     * on two spaces is one the resolver refuses a moment later.
      */
     it.each([
       ["an empty box", ""],
       ["only whitespace", "   "],
-    ])("refuses to send %s", async (_label, typed) => {
+    ])("cannot be sent with %s", async (_label, typed) => {
       serve();
 
       render();
       await screen.findByText(/No replies yet/);
 
       if (typed) await userEvent.type(box(), typed);
+
+      expect((send() as HTMLButtonElement).disabled).toBe(true);
+
+      // Belt and braces: a click on a disabled button is inert in a browser,
+      // and asserting it here is what would catch the button being re-enabled
+      // by some later change without anyone noticing what it guarded.
+      await userEvent.click(send());
+      expect(requests).not.toContain(`POST ${REPLIES_PATH}`);
+    });
+
+    /** The other direction: it comes back the moment there is something to send. */
+    it("enables the send once something is typed", async () => {
+      serve();
+
+      render();
+      await screen.findByText(/No replies yet/);
+      expect((send() as HTMLButtonElement).disabled).toBe(true);
+
+      await userEvent.type(box(), "H");
+      await waitFor(() =>
+        expect((send() as HTMLButtonElement).disabled).toBe(false),
+      );
+    });
+
+    /**
+     * `reset()` empties the box on a successful send, so the button has to go
+     * back with it — a live Send over an empty box is how the same reply gets
+     * posted twice.
+     */
+    it("disables the send again once the reply has landed", async () => {
+      serve();
+      handlers[`POST ${REPLIES_PATH}`] = jsonResponse(reply(), 201);
+
+      render();
+      await screen.findByText(/No replies yet/);
+
+      await userEvent.type(box(), "Have you tried a password reset?");
       await userEvent.click(send());
 
-      expect(
-        await screen.findByText("Write a reply before sending it."),
-      ).toBeDefined();
-      expect(requests).not.toContain(`POST ${REPLIES_PATH}`);
+      await waitFor(() =>
+        expect((send() as HTMLButtonElement).disabled).toBe(true),
+      );
+    });
+
+    /**
+     * A polished draft is text in the box like any other, so the Send it was
+     * disabled for comes back on — the one path to this state that does not go
+     * through a keystroke.
+     */
+    it("enables the send after a polish fills the box", async () => {
+      serve();
+      handlers[`POST ${POLISH_PATH}`] = jsonResponse({ body: "Polished." });
+
+      render();
+      await screen.findByText(/No replies yet/);
+
+      await userEvent.type(box(), "rough");
+      await userEvent.click(polish());
+
+      await waitFor(() =>
+        expect((box() as HTMLTextAreaElement).value).toBe("Polished."),
+      );
+      expect((send() as HTMLButtonElement).disabled).toBe(false);
     });
 
     /**
@@ -356,7 +419,13 @@ describe("TicketThread", () => {
       );
 
       release();
-      await waitFor(() => expect(send()).toHaveProperty("disabled", false));
+      // The in-flight lock lifting is read off the label rather than off
+      // `disabled`, which stays true: a successful send empties the box, and an
+      // empty box disables the Send on its own. Two different reasons for the
+      // same attribute, and only one of them is what this test is about.
+      await waitFor(() =>
+        expect(screen.queryByRole("button", { name: /sending/i })).toBeNull(),
+      );
       expect(posted).toHaveLength(1);
     });
 
@@ -411,6 +480,179 @@ describe("TicketThread", () => {
       await userEvent.click(send());
 
       expect(await screen.findByText("Sent anyway.")).toBeDefined();
+    });
+  });
+
+  /**
+   * The polisher. It rewrites the box and writes nothing to the thread, so
+   * every assertion here is about the textarea and about what did *not* get
+   * posted — a polish that reached `POST …/replies` would publish a draft.
+   */
+  describe("the polish button", () => {
+    it("replaces the draft with what the model sent back", async () => {
+      serve();
+      handlers[`POST ${POLISH_PATH}`] = jsonResponse({
+        body: "Hi Ada,\n\nWe cannot issue a refund after 14 days. Sorry.",
+      });
+
+      render();
+      await screen.findByText(/No replies yet/);
+
+      await userEvent.type(box(), "we cant refund after 14 day sorry");
+      await userEvent.click(polish());
+
+      await waitFor(() =>
+        expect((box() as HTMLTextAreaElement).value).toBe(
+          "Hi Ada,\n\nWe cannot issue a refund after 14 days. Sorry.",
+        ),
+      );
+      expect(posted[0]).toEqual({ body: "we cant refund after 14 day sorry" });
+    });
+
+    /**
+     * The whole point of the separation: polishing produces text for a box the
+     * agent is still typing in. A request to the reply route here would mean a
+     * rewrite had been published without anyone pressing Send.
+     */
+    it("does not send anything", async () => {
+      serve();
+      handlers[`POST ${POLISH_PATH}`] = jsonResponse({ body: "Polished." });
+
+      render();
+      await screen.findByText(/No replies yet/);
+
+      await userEvent.type(box(), "rough draft");
+      await userEvent.click(polish());
+
+      await waitFor(() =>
+        expect((box() as HTMLTextAreaElement).value).toBe("Polished."),
+      );
+      expect(requests).not.toContain(`POST ${REPLIES_PATH}`);
+      expect(screen.queryByText("Polished.", { selector: "div" })).toBeNull();
+    });
+
+    /**
+     * `type="button"`. The default inside a form is submit, which would send
+     * the unpolished draft with a click on the button meant to improve it.
+     */
+    it("is not a submit button", () => {
+      serve();
+      render();
+      expect((polish() as HTMLButtonElement).type).toBe("button");
+    });
+
+    /**
+     * Answered in the box rather than by a round trip: the API would say the
+     * same thing, and the agent can be told immediately.
+     */
+    it("asks for a draft before calling the model", async () => {
+      serve();
+      render();
+      await screen.findByText(/No replies yet/);
+
+      await userEvent.click(polish());
+
+      expect(
+        await screen.findByText("Write a draft before polishing it."),
+      ).toBeDefined();
+      expect(requests).not.toContain(`POST ${POLISH_PATH}`);
+    });
+
+    it("locks both buttons while the rewrite is in flight", async () => {
+      serve();
+      const { responder, release } = gatedResponse({ body: "Polished." });
+      handlers[`POST ${POLISH_PATH}`] = responder;
+
+      render();
+      await screen.findByText(/No replies yet/);
+
+      await userEvent.type(box(), "rough draft");
+      await userEvent.click(polish());
+
+      // A send while the rewrite is in flight would race the response and
+      // could publish the very draft the agent asked to have replaced.
+      await waitFor(() =>
+        expect((send() as HTMLButtonElement).disabled).toBe(true),
+      );
+      expect(screen.getByRole("button", { name: /polishing/i })).toBeDefined();
+
+      release();
+      await waitFor(() =>
+        expect((box() as HTMLTextAreaElement).value).toBe("Polished."),
+      );
+      expect((send() as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    /**
+     * A server with no model configured answers 503 with a message written to
+     * be read. The draft is the agent's own work and must survive it.
+     */
+    it("keeps the draft when the polisher is unavailable", async () => {
+      serve();
+      handlers[`POST ${POLISH_PATH}`] = errorResponse(
+        503,
+        "service_unavailable",
+        "Reply polishing is not configured on this server.",
+      );
+
+      render();
+      await screen.findByText(/No replies yet/);
+
+      await userEvent.type(box(), "rough draft");
+      await userEvent.click(polish());
+
+      expect(
+        await screen.findByText(
+          "Reply polishing is not configured on this server.",
+        ),
+      ).toBeDefined();
+      expect((box() as HTMLTextAreaElement).value).toBe("rough draft");
+    });
+
+    it("keeps the draft when the model itself fails", async () => {
+      serve();
+      handlers[`POST ${POLISH_PATH}`] = errorResponse(
+        502,
+        "bad_gateway",
+        "The model could not be reached. Please try again.",
+      );
+
+      render();
+      await screen.findByText(/No replies yet/);
+
+      await userEvent.type(box(), "rough draft");
+      await userEvent.click(polish());
+
+      expect(
+        await screen.findByText(
+          "The model could not be reached. Please try again.",
+        ),
+      ).toBeDefined();
+      expect((box() as HTMLTextAreaElement).value).toBe("rough draft");
+      expect((send() as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    /** A polished draft is still a draft: the send afterwards posts the rewrite. */
+    it("sends the rewrite once the agent presses send", async () => {
+      serve();
+      handlers[`POST ${POLISH_PATH}`] = jsonResponse({ body: "Polished." });
+      handlers[`POST ${REPLIES_PATH}`] = jsonResponse(
+        reply({ body: "Polished." }),
+        201,
+      );
+
+      render();
+      await screen.findByText(/No replies yet/);
+
+      await userEvent.type(box(), "rough draft");
+      await userEvent.click(polish());
+      await waitFor(() =>
+        expect((box() as HTMLTextAreaElement).value).toBe("Polished."),
+      );
+
+      await userEvent.click(send());
+
+      await waitFor(() => expect(posted[1]).toEqual({ body: "Polished." }));
     });
   });
 });

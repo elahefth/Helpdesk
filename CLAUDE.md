@@ -306,6 +306,126 @@ member of staff said back.
   in hand and blank the conversation while it did. The cost is a colleague's
   reply written in the meantime, which arrives on the next mount.
 
+### Reply polishing — the one place a model runs
+
+`POST /api/tickets/:id/replies/polish` and the **Polish** button beside Send on
+the reply form. An agent's shorthand goes to a language model through OpenRouter
+(Vercel's AI SDK, `apps/api/src/ai/polish-reply.ts`) and the finished email
+comes back into the box. It is the only AI in the repo.
+
+- **It expands, and it does not answer**, which is the whole design of the
+  prompt — and the first half is a correction. It shipped as a copy editor
+  ("fix the grammar, keep it concise, add no greeting"), which is a faithful
+  description of the wrong job: an agent who typed `fixed` got back `Fixed.`
+  A draft is a note about *what* to say, not a draft of *how* to say it. The
+  half that survived is the half that matters: it expands how the draft is said
+  and never adds to what it says, because a model asked to "improve a support
+  reply" invents refund windows and deadlines, and the reader least likely to
+  catch that is an agent skimming a rewrite of their own words. So the draft is
+  the source of every fact, the ticket is context for tone and for what "it"
+  refers to, and the instructions say so in as many words. The student's email
+  is fenced in `<ticket>` with the instructions outside it, which is hardening
+  rather than a boundary — the boundary is that an agent reads the result and
+  presses Send themselves. `INSTRUCTIONS` is exported only so
+  `polish-reply.test.ts` can pin those lines: they fail as a button that works
+  and disappoints, with no error anywhere.
+- **Courtesy is not a fact, but a name is.** A greeting, an acknowledgement and
+  a sign-off assert nothing about the world, which is why they are wanted where
+  the copy editor forbade them — but a model told to close warmly with no name
+  to close as will supply one: a department that does not exist, or the
+  student's own name read back off the ticket. So both are given, the student's
+  from the ticket and the agent's from the session, which is why
+  `buildPolishPrompt` and `ReplyPolisher` take it as a **required** argument
+  (the reasoning `toTicketDetail`'s assignee argument carries) and why the route
+  has its own `req.user` guard. The agent's name is the one piece of prompt
+  outside the fenced blocks: it came from the session, not from a stranger's
+  email.
+- **`OPENROUTER_MODEL` must name models that answer directly.** A reasoning
+  model spends the output budget thinking before it writes, and a rewrite this
+  short is finished by the budget before the reply starts — OpenRouter answers
+  `content: null` with `finish_reason: "length"`, which surfaces as "the model
+  returned an empty reply" rather than as the configuration mistake it is.
+  `openai/gpt-5-nano` fails exactly that way. Cheap instruct models do the job
+  well, at roughly a hundredth of a cent per press; the committed default stays
+  all-free so an install with no credit still works, and `.env.example`
+  documents the paid-primary chain that does not throttle.
+- **Temperature is 0.5, not the 0.3 the copy editor ran at.** Expanding two
+  words into a paragraph is composition, and a near-deterministic setting
+  returns the same stilted sentence on the second press — which is the press an
+  agent makes *because* they disliked the first answer.
+- **A separate route from `POST …/replies`, and it writes nothing.** Folding
+  them together would mean the only way to see a polished reply is to have
+  already published it. It answers **200** with `{ body }` rather than a
+  `TicketReply`, and keeping the shapes distinct is what stops a rewrite from
+  ever reading like something that was said.
+- **Ticket-scoped for the model, not for the URL.** The route loads the ticket
+  and puts the student's own email in the prompt. A context-free "improve this
+  text" endpoint would have to guess at register and referents, and its guesses
+  are the parts an agent has to undo.
+- **`OPENROUTER_API_KEY` is optional even in production**, unlike
+  `BETTER_AUTH_SECRET` and `INBOUND_EMAIL_SECRET`. Those guard something, so
+  booting without one is a hole; this one *enables* something. `createReplyPolisher()`
+  returns `undefined` without it — the same `getDb()` / `createAuth(db)` shape —
+  and the route answers 503 naming the missing config.
+- **`OPENROUTER_MODEL` is a preference order, not one id.** The first is the
+  primary and the rest are handed to OpenRouter's own `models` routing, which
+  serves the next one when the primary is throttled. That is what makes a
+  `:free` tier usable at all: free models sit behind a shared upstream pool
+  that throttles and recovers minute to minute, so a lone id makes Polish work
+  intermittently for reasons no agent can see or act on. The default chain is
+  five *different* providers on purpose — entries from one provider share the
+  pool that just throttled — and `providerOptions` is omitted entirely when a
+  batch has one entry, so a single-model install's requests are unchanged.
+  Splitting happens in `env.ts` so a malformed list fails at boot rather than
+  on the first click.
+- **OpenRouter accepts at most three ids per `models` array**, so a longer
+  chain is walked in batches of three by `modelBatches` rather than sent whole.
+  This is the trap worth knowing before editing `OPENROUTER_MODEL`: a fourth id
+  is not ignored and does not degrade — it is rejected outright with
+  `'models' array must have 3 items or fewer`, failing *every* request, and it
+  surfaces as a generic call error. The symptom is a Polish button that has
+  never worked on a `.env` line that reads perfectly well. The batches share
+  one `AbortSignal.timeout` deadline, because a per-batch timeout would
+  multiply by the number of batches and hold a request for minutes while each
+  individual call looked well-behaved; `maxRetries` is 0 for the same reason
+  the chain exists — a retry re-asks the pool that just refused.
+- **`TIMEOUT_MS` is 60s because it covers the whole walk, not one call.**
+  Measured against the live free tier: a throttled model refuses in well under
+  a second, but one that *accepts* can take twenty, so a chain that walks past
+  several refusals into a slow answer needs room a 30s ceiling did not leave —
+  it turned requests that were about to succeed into 502s.
+- **The polisher's failures are 502, via `HttpError.badGateway`.** Distinct from
+  500 (this API is broken) and 503 (a dependency is missing): the request was
+  fine and someone else's server was not. `ReplyPolishError` carries a message
+  written to be rendered as-is, and the provider's own error — which holds the
+  URL, the model id, sometimes a key prefix — stays on `cause` for the log line.
+  `describeProviderFailure` picks that message by status, and the point is the
+  reader's next move rather than accuracy for its own sake: 429 means press the
+  button again shortly, 401/403 means fetch whoever holds the key, 404 means
+  `OPENROUTER_MODEL` names something retired. It reads the status off the SDK's
+  `RetryError.lastError` — the outer error carries no `statusCode`, so reading
+  it alone silently reports every failure as the generic one.
+- **An unusable answer is refused, not salvaged.** Empty means a refusal or a
+  filtered generation, and handing it back would silently blank a draft;
+  over-length means the model started answering the student instead of editing,
+  and truncating would put half of that in the box as if it were finished.
+  `unwrapModelReply` strips only the two unambiguous wrappers a small model adds
+  — a fence around the *whole* answer, and the prompt's own `<draft>` tags. A
+  leading "Here is your improved reply:" is deliberately left alone: it cannot
+  be told from a first sentence the agent wrote.
+- **`ticketReplyBodyField` in `packages/shared` is shared between the two
+  writes**, a factory so each says its own thing about an empty box while the
+  *ceiling* cannot drift — a draft the polisher accepted and the send route
+  rejected is a dead end reached only after the model has been paid for.
+- **The SPA disables the textarea and both buttons while a rewrite is in
+  flight.** A send would race the `setValue` and could publish the very draft
+  the agent asked to have replaced; typing would be overwritten by the response,
+  and losing a sentence that way is invisible. The Polish button is
+  `type="button"` — the default inside a form is submit, which would send the
+  unpolished draft with a click on the button meant to improve it — and the
+  polisher's error renders separately from the form's `root`, so a failed
+  polish never reads as a failed send.
+
 ### Web
 
 Routing is defined in one place, `apps/web/src/main.tsx`. `/login` sits outside the layout; **everything else nests under `RequireAuth`** so a new route is protected by default. `RequireAdmin` nests inside that for admin-only screens.

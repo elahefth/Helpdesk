@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
   createTicketReplyBodySchema,
   listTicketsQuerySchema,
+  polishTicketReplyBodySchema,
   TICKET_REPLY_MAX_LENGTH,
   updateTicketBodySchema,
 } from "@helpdesk/shared";
@@ -223,6 +224,61 @@ describe("createTicketReplyBodySchema", () => {
     // they got wrong only by luck.
     expect(
       createTicketReplyBodySchema.safeParse({ text: "Have you tried…" })
+        .success,
+    ).toBe(false);
+  });
+});
+
+/**
+ * The draft on its way to the polisher. It is held to the same rules a sent
+ * reply is, and the ceiling is the half that matters: a draft this schema
+ * accepted and `createTicketReplyBodySchema` then rejected would be a rewrite
+ * the agent paid for and could not send.
+ */
+describe("polishTicketReplyBodySchema", () => {
+  it("trims the draft", () => {
+    expect(polishTicketReplyBodySchema.parse({ body: "  fix this  " })).toEqual(
+      {
+        body: "fix this",
+      },
+    );
+  });
+
+  it.each([
+    ["an empty draft", ""],
+    ["a whitespace-only draft", "   \n  "],
+  ])("refuses %s — there is nothing to rewrite", (_label, body) => {
+    expect(polishTicketReplyBodySchema.safeParse({ body }).success).toBe(false);
+  });
+
+  it("says what to do about an empty box, in the polisher's own words", () => {
+    const result = polishTicketReplyBodySchema.safeParse({ body: "" });
+    expect(result.error?.issues[0]?.message).toBe(
+      "Write a draft before polishing it.",
+    );
+  });
+
+  it("shares the sent reply's ceiling", () => {
+    const atLimit = "x".repeat(TICKET_REPLY_MAX_LENGTH);
+    expect(
+      polishTicketReplyBodySchema.safeParse({ body: atLimit }).success,
+    ).toBe(true);
+    expect(
+      polishTicketReplyBodySchema.safeParse({ body: `${atLimit}x` }).success,
+    ).toBe(false);
+    // The pairing is the point: neither side may drift from the other.
+    expect(
+      createTicketReplyBodySchema.safeParse({ body: atLimit }).success,
+    ).toBe(true);
+  });
+
+  /**
+   * Strict for the reason its neighbour is: a plain object would strip a
+   * misspelled field and hand the model a rewrite of nothing, answered 200.
+   */
+  it("refuses a key it does not know rather than dropping it", () => {
+    expect(
+      polishTicketReplyBodySchema.safeParse({ body: "ok", tone: "formal" })
         .success,
     ).toBe(false);
   });

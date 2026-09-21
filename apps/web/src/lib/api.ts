@@ -7,6 +7,7 @@ import {
   listTicketRepliesResponseSchema,
   listTicketsResponseSchema,
   listUsersResponseSchema,
+  polishTicketReplyResponseSchema,
   readinessSchema,
   ticketDetailSchema,
   updateUserResponseSchema,
@@ -21,6 +22,8 @@ import {
   type ListTicketsResponse,
   type ListUsersQuery,
   type ListUsersResponse,
+  type PolishTicketReplyBody,
+  type PolishTicketReplyResponse,
   type Readiness,
   type TicketDetail,
   type UpdateTicketBody,
@@ -170,6 +173,29 @@ export function createTicketReply(
   return request(
     `/api/tickets/${encodeURIComponent(id)}/replies`,
     createTicketReplyResponseSchema,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+}
+
+/**
+ * Hand a draft reply to a language model and get a tidier version of the same
+ * reply back.
+ *
+ * Nothing is written: the response is text for the box the agent is still
+ * typing in, which is why it is a `{ body }` rather than a `TicketReply`. The
+ * send is a separate call they make afterwards, having read it.
+ *
+ * A 503 here means the server has no model configured rather than that the
+ * request was wrong, and a 502 means the model failed — both arrive as an
+ * `ApiRequestError` carrying a message written to be shown as-is.
+ */
+export function polishTicketReply(
+  id: string,
+  body: PolishTicketReplyBody,
+): Promise<PolishTicketReplyResponse> {
+  return request(
+    `/api/tickets/${encodeURIComponent(id)}/replies/polish`,
+    polishTicketReplyResponseSchema,
     { method: "POST", body: JSON.stringify(body) },
   );
 }

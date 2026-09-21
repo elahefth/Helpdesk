@@ -357,6 +357,68 @@ describe("ticket replies", () => {
   });
 });
 
+/**
+ * The polisher, which is configured by neither this test nor CI: with no
+ * `OPENROUTER_API_KEY`, `createReplyPolisher()` returns undefined and the route
+ * answers 503 before it looks for a database. That is what these assert —
+ * reaching that answer means the route matched, the guard let the caller
+ * through, and the body parsed.
+ */
+describe("polish a draft reply", () => {
+  const TICKET = "/api/tickets/00000000-0000-4000-8000-0000000000aa";
+  const POLISH = `${TICKET}/replies/polish`;
+  const DRAFT = { body: "hi we cant do refund after 14 day sorry" };
+
+  it("rejects an unauthenticated request", async () => {
+    const res = await postAs("anon", POLISH, DRAFT);
+    expect(res.status).toBe(401);
+  });
+
+  /**
+   * Polishing a draft is part of answering a student, not a supervisor act, so
+   * a 403 here is the regression — the same rule the reply write carries.
+   */
+  it("admits an agent, not just an admin", async () => {
+    const res = await postAs("agent", POLISH, DRAFT);
+    expect(res.status).toBe(503);
+    expect((await body(res)).error.code).toBe("service_unavailable");
+  });
+
+  /**
+   * `/tickets/:id/replies` sits above this and matches one path segment. If the
+   * nested route were shadowed, a request to polish a draft would create a
+   * reply — a rewrite published as if it had been sent.
+   */
+  it("does not fall through to the reply write", async () => {
+    const res = await postAs("agent", POLISH, DRAFT);
+    // 201 would mean the POST above answered it; a validation error would mean
+    // the strict reply schema saw this body. 503 is the polish route's own.
+    expect(res.status).toBe(503);
+    expect((await body(res)).error.message).toMatch(/polish/i);
+  });
+
+  it("rejects a malformed ticket id before touching anything", async () => {
+    const res = await postAs(
+      "agent",
+      "/api/tickets/nope/replies/polish",
+      DRAFT,
+    );
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("bad_request");
+  });
+
+  it.each([
+    ["an empty draft", { body: "" }],
+    ["a whitespace-only draft", { body: "   " }],
+    ["no body at all", {}],
+    ["a key it does not know", { body: "ok", tone: "friendly" }],
+  ])("rejects %s before calling a model", async (_label, payload) => {
+    const res = await postAs("agent", POLISH, payload);
+    expect(res.status).toBe(400);
+    expect((await body(res)).error.code).toBe("validation_failed");
+  });
+});
+
 describe("assignees", () => {
   it("rejects an unauthenticated request", async () => {
     const res = await get("/api/assignees");

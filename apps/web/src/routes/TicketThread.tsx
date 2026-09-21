@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   createTicketReplyBodySchema,
@@ -8,7 +8,12 @@ import {
   type ListTicketRepliesResponse,
   type TicketReply,
 } from "@helpdesk/shared";
-import { createTicketReply, listTicketReplies } from "../lib/api.ts";
+import { Sparkles } from "lucide-react";
+import {
+  createTicketReply,
+  listTicketReplies,
+  polishTicketReply,
+} from "../lib/api.ts";
 import { useSession } from "../lib/auth-client.ts";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -136,12 +141,82 @@ function ReplyForm({ ticketId }: { ticketId: string }) {
     register,
     handleSubmit,
     reset,
+    getValues,
+    setValue,
     setError,
+    clearErrors,
+    control,
     formState: { errors, isSubmitting },
   } = useForm<CreateTicketReplyBody>({
     resolver: zodResolver(createTicketReplyBodySchema),
     defaultValues: { body: "" },
   });
+
+  /**
+   * The polisher: the draft in the box goes to a language model and the tidier
+   * version it returns replaces it.
+   *
+   * A mutation with no cache writes at all, unlike the send below — nothing was
+   * created, so there is nothing to file. Its `error` is rendered on its own
+   * rather than pushed into the form's `root`, which keeps a failed polish from
+   * looking like a failed send and keeps either one from clearing the other's
+   * message.
+   */
+  const polish = useMutation({
+    mutationFn: (body: string) => polishTicketReply(ticketId, { body }),
+    onSuccess: ({ body }) => {
+      // `shouldDirty` so the box reads as edited, and `shouldValidate` because
+      // the rewrite is new text against the same rules — a model that answered
+      // with something unsendable should say so here rather than at the send.
+      setValue("body", body, { shouldDirty: true, shouldValidate: true });
+    },
+  });
+
+  /**
+   * Polishing is a rewrite of what is in the box, so it needs something in the
+   * box. Checked here rather than by letting the API answer 400, because the
+   * round trip would tell the agent something they can be told immediately —
+   * and the message is the field's own, in the place they are already looking.
+   */
+  const onPolish = () => {
+    const draft = getValues("body").trim();
+
+    if (!draft) {
+      setError("body", { message: "Write a draft before polishing it." });
+      return;
+    }
+
+    clearErrors("body");
+    polish.mutate(draft);
+  };
+
+  // One flag for both buttons: a send while a rewrite is in flight would race
+  // the `setValue` above and could publish the draft the agent asked to have
+  // replaced.
+  const busy = isSubmitting || polish.isPending;
+
+  /**
+   * Whether there is anything to send.
+   *
+   * Not `formState.isValid`, which would need `mode: "onChange"` and would move
+   * *every* message on this form from the submit to the keystroke — a much
+   * larger change than disabling one button, and one that scolds an agent
+   * halfway through their first word.
+   *
+   * `useWatch` rather than the `watch` beside it in the same API, and the
+   * difference is invisible until you run the linter: `watch` subscribes in a
+   * way the React Compiler cannot follow, so it answers
+   * `react-hooks/incompatible-library` and skips compiling **the whole
+   * component** — a warning rather than an error, which is exactly how it would
+   * have stayed. `useWatch` is a hook and subscribes through the `control`, so
+   * the compiler keeps the component.
+   *
+   * Trimmed, because the schema trims: untrimmed, a box holding two spaces
+   * offers a Send that the resolver then refuses, which is the round trip the
+   * disabled state exists to avoid. The `?? ""` is for the type — the field has
+   * a default and is never actually undefined.
+   */
+  const empty = (useWatch({ control, name: "body" }) ?? "").trim().length === 0;
 
   const { mutateAsync } = useMutation({
     mutationFn: (values: CreateTicketReplyBody) =>
@@ -220,7 +295,10 @@ function ReplyForm({ ticketId }: { ticketId: string }) {
               placeholder="Write your reply to the student…"
               aria-invalid={errors.body ? true : undefined}
               aria-describedby={errors.body ? "reply-body-error" : undefined}
-              disabled={isSubmitting}
+              // Disabled while a rewrite is in flight as well as while sending:
+              // whatever is typed in the meantime is about to be overwritten by
+              // the response, and losing a sentence that way is invisible.
+              disabled={busy}
               {...register("body")}
             />
             <FieldError id="reply-body-error" errors={[errors.body]} />
@@ -234,7 +312,13 @@ function ReplyForm({ ticketId }: { ticketId: string }) {
           */}
           <p className="text-sm text-muted-foreground">
             Replies are recorded on the ticket. Nothing is emailed to the
-            student yet.
+            student yet.{" "}
+            {/*
+              Said here rather than in a tooltip on the button: a rewrite
+              replaces what an agent wrote, and "read it before you send it" is
+              the one thing they need to know before pressing it, not after.
+            */}
+            Polish rewrites your draft with AI — read it over before sending.
           </p>
 
           {errors.root && (
@@ -243,9 +327,50 @@ function ReplyForm({ ticketId }: { ticketId: string }) {
             </p>
           )}
 
-          <Button type="submit" disabled={isSubmitting}>
-            {isSubmitting ? "Sending…" : "Send reply"}
-          </Button>
+          {/*
+            The polisher's own failures, separate from the send's. Both a
+            missing model (503) and a model that failed (502) arrive as an
+            `ApiRequestError` whose message the API writes to be shown as-is,
+            so there is nothing to translate here — and the draft is untouched
+            either way, which is what makes this a note rather than a blocker.
+          */}
+          {polish.isError && (
+            <p role="alert" className="text-sm text-destructive">
+              {polish.error instanceof Error
+                ? polish.error.message
+                : "Could not polish the draft. Please try again."}
+            </p>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2">
+            {/*
+              Before the send, and deliberately so: it is a step on the way to
+              sending, and putting it after would read as something you do to a
+              reply already gone. `type="button"` because it is inside the form
+              and the default would submit it — sending the unpolished draft
+              with one click on the button meant to improve it.
+            */}
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onPolish}
+              disabled={busy}
+            >
+              <Sparkles aria-hidden="true" />
+              {polish.isPending ? "Polishing…" : "Polish"}
+            </Button>
+
+            {/*
+              Disabled on an empty box rather than answered with "write a reply
+              first" after the click. The message was never news — the box is
+              directly above it and its placeholder says what goes in — so the
+              press only existed to be refused. `reset()` on a successful send
+              empties the box, so the button goes back to disabled by itself.
+            */}
+            <Button type="submit" disabled={busy || empty}>
+              {isSubmitting ? "Sending…" : "Send reply"}
+            </Button>
+          </div>
         </form>
       </CardContent>
     </Card>

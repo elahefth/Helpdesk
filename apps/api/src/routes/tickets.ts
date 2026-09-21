@@ -4,14 +4,21 @@ import {
   canTransition,
   createTicketReplyBodySchema,
   listTicketsQuerySchema,
+  polishTicketReplyBodySchema,
   ticketSummarySchema,
   updateTicketBodySchema,
   type CreateTicketReplyResponse,
   type ListTicketRepliesResponse,
   type ListTicketsResponse,
+  type PolishTicketReplyResponse,
   type TicketDetail,
   type UpdateTicketResponse,
 } from "@helpdesk/shared";
+import {
+  createReplyPolisher,
+  ReplyPolishError,
+  type ReplyPolisher,
+} from "../ai/polish-reply.ts";
 import type { Database } from "../db/client.ts";
 import { ticket, ticketReply, user } from "../db/schema.ts";
 import { HttpError } from "../middleware/errors.ts";
@@ -116,7 +123,16 @@ async function findTicketDetail(
  * module-level const while the list was a fixture; it reads real rows now, so
  * it takes the handle and answers for its absence.
  */
-export function createTicketsRouter(db: Database | undefined): Router {
+export function createTicketsRouter(
+  db: Database | undefined,
+  /**
+   * The reply polisher, defaulted rather than injected from `app.ts` so the
+   * wiring stays in one place — and a parameter rather than a module-level
+   * const so a test can hand in a stub instead of reaching OpenRouter.
+   * `undefined` when no key is configured, which the route answers for.
+   */
+  polishReply: ReplyPolisher | undefined = createReplyPolisher(),
+): Router {
   const router = Router();
 
   router.get("/tickets", async (req, res) => {
@@ -425,6 +441,76 @@ export function createTicketsRouter(db: Database | undefined): Router {
     const body: CreateTicketReplyResponse = toTicketReply(row, req.user);
 
     res.status(201).json(body);
+  });
+
+  /**
+   * Rewrite a draft reply with a language model, and write nothing.
+   *
+   * A separate route from the POST above rather than a flag on it, because the
+   * two do different things to the world: this one produces text for a box the
+   * agent is still typing in, and sending is a second, deliberate act. Folding
+   * them together would mean the only way to see a polished reply is to have
+   * already published it.
+   *
+   * Ticket-scoped for the model's sake, not the URL's: the prompt carries the
+   * student's email so a rewrite knows what "it" refers to and can match the
+   * register the student wrote in. See `ai/polish-reply.ts` for why that
+   * context is explicitly *not* a second source of facts.
+   *
+   * Open to any signed-in staff member, like the reply it drafts.
+   */
+  router.post("/tickets/:id/replies/polish", async (req, res) => {
+    const id = ticketSummarySchema.shape.id.safeParse(req.params.id);
+    if (!id.success) throw HttpError.badRequest("Malformed ticket id");
+
+    // Validated before either dependency is checked, as everywhere else here.
+    // The draft is held to the same ceiling a sent reply is, so the polisher is
+    // never paid for on text that could not have been sent anyway.
+    const input = polishTicketReplyBodySchema.parse(req.body);
+
+    // The same guard the reply write carries, and now for a second reason: the
+    // polished reply is signed off with this name, so a request that reached
+    // the model without one would come back signed by whoever the model decided
+    // to be.
+    if (!req.user) throw HttpError.unauthorized();
+
+    // 503 rather than 404, and the message names the missing key: this route
+    // exists, and the install simply has no model configured. An admin reading
+    // "not found" would go looking for a bug in the SPA.
+    if (!polishReply) {
+      throw HttpError.serviceUnavailable(
+        "Reply polishing is not configured on this server.",
+      );
+    }
+
+    if (!db) throw HttpError.serviceUnavailable("Database unavailable");
+
+    // The ticket is what the draft is polished against, so an unknown id is a
+    // 404 here for the same reason it is on the thread routes — and it is read
+    // before the model is called, so a dead link costs nothing.
+    const ticket = await findTicketDetail(db, id.data);
+    if (!ticket) throw HttpError.notFound(`Ticket ${id.data} not found`);
+
+    req.log.debug({ ticketId: id.data }, "polishing a draft reply");
+
+    let polished: string;
+    try {
+      polished = await polishReply(input.body, ticket, req.user.name);
+    } catch (error) {
+      // Only the polisher's own failures are translated. Anything else is a bug
+      // in this API and belongs in the 500 the error handler gives it.
+      if (!(error instanceof ReplyPolishError)) throw error;
+
+      // Logged with the cause, which is where the provider's own message lives;
+      // the client gets `error.message`, which is written to be safe to render.
+      req.log.warn({ err: error }, "reply polishing failed");
+      throw HttpError.badGateway(error.message);
+    }
+
+    // 200, not 201: nothing was created. The draft in the box is still the only
+    // copy, and it is still the agent's.
+    const body: PolishTicketReplyResponse = { body: polished };
+    res.json(body);
   });
 
   return router;

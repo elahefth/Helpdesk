@@ -327,26 +327,75 @@ export type ListTicketRepliesResponse = z.infer<
  * 201 having posted an empty reply — except it would not, because `body` is
  * required, which is the version of that failure with a message attached.
  */
+/**
+ * The reply text, as both writes that take one accept it: trimmed, required,
+ * and capped at `TICKET_REPLY_MAX_LENGTH`.
+ *
+ * A factory rather than one shared field, because the two callers say different
+ * things about an empty box — you send a reply and you polish a draft — while
+ * the *ceiling* is the part that must not drift: a draft the polisher accepted
+ * and the send route then rejected would be a dead end reached only after the
+ * model had been paid for.
+ */
+function ticketReplyBodyField(emptyMessage: string) {
+  return z
+    .string()
+    .trim()
+    .min(1, emptyMessage)
+    .max(
+      TICKET_REPLY_MAX_LENGTH,
+      `A reply cannot be longer than ${TICKET_REPLY_MAX_LENGTH.toLocaleString("en-US")} characters.`,
+    );
+}
+
 export const createTicketReplyBodySchema = z.strictObject({
   /**
    * Trimmed, then required. A reply of only whitespace is a misfire — the
    * Enter key on an empty box — and storing one puts a blank bubble in a thread
    * that nobody can delete.
    */
-  body: z
-    .string()
-    .trim()
-    .min(1, "Write a reply before sending it.")
-    .max(
-      TICKET_REPLY_MAX_LENGTH,
-      `A reply cannot be longer than ${TICKET_REPLY_MAX_LENGTH.toLocaleString("en-US")} characters.`,
-    ),
+  body: ticketReplyBodyField("Write a reply before sending it."),
 });
 export type CreateTicketReplyBody = z.infer<typeof createTicketReplyBodySchema>;
 
 /** POST /api/tickets/:id/replies answers 201 with the reply it created. */
 export const createTicketReplyResponseSchema = ticketReplySchema;
 export type CreateTicketReplyResponse = TicketReply;
+
+/**
+ * Body for POST /api/tickets/:id/replies/polish — the draft an agent has typed,
+ * on its way to a language model that rewrites it.
+ *
+ * Ticket-scoped rather than a general "improve this text" endpoint, and that is
+ * the design decision here: the route reads the ticket the draft answers and
+ * puts the student's own words in the prompt, so the rewrite can keep a
+ * reference to what was actually asked. A context-free polisher would have to
+ * guess, and its guesses would be the parts an agent has to undo.
+ *
+ * `strictObject` for the reason its neighbour is: a caller that spelled the
+ * field `text` must be answered rather than have the draft silently dropped and
+ * a rewrite of nothing returned.
+ */
+export const polishTicketReplyBodySchema = z.strictObject({
+  body: ticketReplyBodyField("Write a draft before polishing it."),
+});
+export type PolishTicketReplyBody = z.infer<typeof polishTicketReplyBodySchema>;
+
+/**
+ * The rewritten draft, and nothing else.
+ *
+ * Deliberately not a `TicketReply`: polishing writes no row and creates
+ * nothing. What comes back is text for the box the agent is still typing in,
+ * which they are free to edit or ignore — the send is a separate, explicit act,
+ * and keeping the shapes distinct is what stops a polish from ever reading like
+ * something that was said.
+ */
+export const polishTicketReplyResponseSchema = z.object({
+  body: z.string().max(TICKET_REPLY_MAX_LENGTH),
+});
+export type PolishTicketReplyResponse = z.infer<
+  typeof polishTicketReplyResponseSchema
+>;
 
 /**
  * Who a ticket may be assigned to: every staff account that has not been
