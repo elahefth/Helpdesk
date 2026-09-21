@@ -125,6 +125,7 @@ function ticket(overrides: Partial<TicketDetail> = {}): TicketDetail {
     studentEmail: "ada.student@example.com",
     status: "open",
     category: "technical",
+    classification: "skipped",
     body: "Hi,\n\nThe portal rejects my password.\n\nThanks,\nAda",
     supportEmail: "support@example.edu",
     receivedAt: "2026-08-20T09:15:00.000Z",
@@ -253,6 +254,51 @@ describe("TicketDetailPage", () => {
       screen.getByRole("combobox", { name: /^category/i }).textContent,
     ).toContain("None");
   });
+
+  /**
+   * The select reads "None" for a ticket whose category is thirty seconds
+   * away, which is the same thing it reads for a ticket nobody will ever
+   * classify. This line is the only thing separating them.
+   */
+  it("says so while the classifier still owes an answer", async () => {
+    serve(ticket({ category: null, classification: "pending" }));
+
+    renderDetail();
+    await screen.findByRole("heading", { name: /Cannot log in/ });
+
+    expect(screen.getByText(/classifying automatically/i)).toBeDefined();
+  });
+
+  /**
+   * The reader is looking at an empty category that *was* going to be filled
+   * in. Handing the decision back explicitly beats leaving them to wonder
+   * whether something is still running.
+   */
+  it("says when automatic classification failed", async () => {
+    serve(ticket({ category: null, classification: "failed" }));
+
+    renderDetail();
+    await screen.findByRole("heading", { name: /Cannot log in/ });
+
+    expect(screen.getByText(/could not be classified/i)).toBeDefined();
+  });
+
+  /**
+   * A category the model chose and a category a colleague chose are the same
+   * fact about the ticket. Labelling one of them would invite the reader to
+   * trust it differently from the work in front of them.
+   */
+  it.each([["done"], ["skipped"]])(
+    "says nothing about a %s classification",
+    async (classification) => {
+      serve(ticket({ classification: classification as "done" | "skipped" }));
+
+      renderDetail();
+      await screen.findByRole("heading", { name: /Cannot log in/ });
+
+      expect(screen.queryByText(/classif/i)).toBeNull();
+    },
+  );
 
   it("shows a placeholder while the ticket loads", async () => {
     const { responder, release } = gatedResponse(ticket());

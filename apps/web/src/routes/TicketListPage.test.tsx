@@ -69,6 +69,7 @@ function ticketRow(overrides: Partial<TicketSummary> = {}): TicketSummary {
     studentEmail: "ada.student@example.com",
     status: "open",
     category: null,
+    classification: "skipped",
     receivedAt: "2026-08-20T09:15:00.000Z",
     createdAt: "2026-08-20T09:15:01.000Z",
     updatedAt: "2026-08-20T09:15:01.000Z",
@@ -242,6 +243,46 @@ describe("TicketListPage", () => {
     renderList();
 
     expect(await screen.findByText("unclassified")).toBeDefined();
+  });
+
+  /**
+   * The other reason a category cell can be empty, and the one the reader
+   * cannot otherwise tell from the permanent kind. Classification runs after
+   * ingestion has already answered, so a ticket that arrived seconds ago has
+   * no category *yet* — and a working classifier that looks identical to an
+   * absent one is the failure this whole field exists to prevent.
+   */
+  it("says a pending ticket is being classified, not that it is unclassified", async () => {
+    responders.push(
+      jsonResponse(pageOf([ticketRow({ classification: "pending" })])),
+    );
+
+    renderList();
+
+    expect(await screen.findByText("classifying…")).toBeDefined();
+    expect(screen.queryByText("unclassified")).toBeNull();
+  });
+
+  /**
+   * A category that arrived wins over the state that was tracking it. The two
+   * can disagree on a ticket a human categorised while a job was queued — the
+   * API closes that job in the same statement, but the row in hand may predate
+   * it, and "classifying…" beside a category nobody is going to change is the
+   * wrong half to show.
+   */
+  it("shows the category rather than the state once one is set", async () => {
+    responders.push(
+      jsonResponse(
+        pageOf([
+          ticketRow({ category: "technical", classification: "pending" }),
+        ]),
+      ),
+    );
+
+    renderList();
+
+    expect(await screen.findByText("Technical")).toBeDefined();
+    expect(screen.queryByText("classifying…")).toBeNull();
   });
 
   it("shows the human label for a category the sender stated", async () => {

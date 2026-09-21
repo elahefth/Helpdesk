@@ -336,7 +336,23 @@ export function createTicketsRouter(
         ? { assignedToId: input.assigneeId }
         : {}),
       ...(nextStatus ? { status: nextStatus } : {}),
-      ...(input.category !== undefined ? { category: input.category } : {}),
+      /**
+       * A human deciding the category also closes the classifier's job on this
+       * ticket, which is why the two are written together and never apart.
+       *
+       * Without it a PATCH that lands while a classification is in flight
+       * leaves the row `pending` forever: the queue's guarded UPDATE correctly
+       * refuses to overwrite the category, so nothing ever moves the state off
+       * `pending`, and the queue renders "Classifying…" next to a category a
+       * colleague chose. `skipped` is the right terminal value rather than
+       * `done` — it means "the classifier is not the author of this", which is
+       * exactly what just became true, and it holds for the null case too:
+       * clearing a category by hand is a decision, not an invitation to guess
+       * again.
+       */
+      ...(input.category !== undefined
+        ? { category: input.category, classification: "skipped" as const }
+        : {}),
     };
 
     // Skipping an empty write is not an optimisation. `updatedAt` is

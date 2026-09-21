@@ -18,6 +18,7 @@ const ROW: typeof ticket.$inferSelect = {
   body: "I have reset my password twice.",
   status: "open",
   category: null,
+  classification: "skipped",
   assignedToId: null,
   sourceMessageId: null,
   receivedAt: new Date("2026-08-20T09:15:00.000Z"),

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   ticketCategorySchema,
+  ticketClassificationSchema,
   ticketStatusSchema,
   userRoleSchema,
 } from "./domain.ts";
@@ -80,6 +81,19 @@ export const ticketSummarySchema = z.object({
   studentEmail: z.string().email(),
   status: ticketStatusSchema,
   category: ticketCategorySchema.nullable(),
+  /**
+   * What the automatic classifier did with this ticket, which `category` alone
+   * cannot say — see `TICKET_CLASSIFICATIONS`.
+   *
+   * It is on the *summary* rather than on the detail, unlike `assignee`, and
+   * the reason is the opposite of the one that keeps the assignee off: this
+   * costs no join, it is a column already on the row, and the queue is exactly
+   * where it has to be readable. Classification happens after the 201, so the
+   * first thing anyone sees of a new ticket is a list row with no category —
+   * and without this field that row cannot tell "an answer is coming" from
+   * "nobody is going to classify this".
+   */
+  classification: ticketClassificationSchema,
   receivedAt: z.string().datetime(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),

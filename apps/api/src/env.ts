@@ -45,7 +45,8 @@ const envSchema = z
     INBOUND_EMAIL_SECRET: z.string().min(16).optional(),
 
     /**
-     * OpenRouter credentials for the reply polisher.
+     * OpenRouter credentials, shared by everything that runs a model: the reply
+     * polisher, the ticket summariser, and the automatic classifier.
      *
      * Optional everywhere, including production, and that is the difference
      * between this and the two secrets above: they guard something, so booting
@@ -53,12 +54,18 @@ const envSchema = z
      * never sets it simply has no polish button that works — the route answers
      * 503 and says so — which is a better failure than an API that refuses to
      * start because an optional convenience is unconfigured.
+     *
+     * The classifier is the one of the three with no route to answer for its
+     * absence, because nobody asked it a question: ingestion marks the ticket
+     * `skipped` instead, which is the honest record that nothing was asked and
+     * nothing is coming. Categories then stay what they were before any of this
+     * existed — a human decision, or null.
      */
     OPENROUTER_API_KEY: z.string().min(1).optional(),
 
     /**
-     * Which model rewrites a draft — a comma-separated preference order, not
-     * one id.
+     * Which model runs — a comma-separated preference order, not one id, and
+     * shared by all three features that call one.
      *
      * The first is the primary and the rest are fallbacks, handed to
      * OpenRouter's own `models` routing: when the primary is throttled it
@@ -88,7 +95,9 @@ const envSchema = z
      * spends the output budget thinking before it writes, and a rewrite this
      * short can be finished by the budget before the reply begins — which
      * arrives as `content: null` and is reported as an empty reply, not as the
-     * configuration mistake it is. And free models share an upstream pool that
+     * configuration mistake it is. The classifier is where that shows up first,
+     * because its budget is the smallest of the three (one word), and it shows
+     * up quietly: tickets marked `failed` with no button anyone pressed. And free models share an upstream pool that
      * throttles minute to minute, so a chain with nothing paid in it makes the
      * button work intermittently for reasons no agent can see.
      */

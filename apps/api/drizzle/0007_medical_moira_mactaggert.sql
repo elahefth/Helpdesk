@@ -1,0 +1,2 @@
+CREATE TYPE "public"."ticket_classification" AS ENUM('skipped', 'pending', 'done', 'failed');--> statement-breakpoint
+ALTER TABLE "ticket" ADD COLUMN "classification" "ticket_classification" DEFAULT 'skipped' NOT NULL;

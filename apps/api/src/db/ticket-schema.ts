@@ -7,7 +7,11 @@ import {
   timestamp,
   uuid,
 } from "drizzle-orm/pg-core";
-import { TICKET_CATEGORIES, TICKET_STATUSES } from "@helpdesk/shared";
+import {
+  TICKET_CATEGORIES,
+  TICKET_CLASSIFICATIONS,
+  TICKET_STATUSES,
+} from "@helpdesk/shared";
 import { user } from "./auth-schema.ts";
 
 /**
@@ -22,6 +26,10 @@ import { user } from "./auth-schema.ts";
  */
 export const ticketStatusEnum = pgEnum("ticket_status", TICKET_STATUSES);
 export const ticketCategoryEnum = pgEnum("ticket_category", TICKET_CATEGORIES);
+export const ticketClassificationEnum = pgEnum(
+  "ticket_classification",
+  TICKET_CLASSIFICATIONS,
+);
 
 export const ticket = pgTable(
   "ticket",
@@ -61,6 +69,29 @@ export const ticket = pgTable(
      * stated a category, or a human, ever sets it.
      */
     category: ticketCategoryEnum("category"),
+
+    /**
+     * What the automatic classifier did with this row — see
+     * `TICKET_CLASSIFICATIONS` for what each value means.
+     *
+     * **The default is `skipped`, not `pending`, and that is load-bearing.**
+     * Every ticket that existed before this column did gets the default on
+     * migration, and `pending` would have marked the whole back catalogue as
+     * waiting on a classifier that is never going to run — a hundred rows
+     * reading "Classifying…" forever, and, worse, a hundred rows the boot
+     * sweep in `ticket-classification.ts` would dutifully pick up and spend a
+     * model call on. `skipped` says the true thing about them: nobody asked.
+     * Ingestion writes `pending` explicitly, in the same INSERT that creates
+     * the row, so a ticket is never briefly-default before being marked.
+     *
+     * No index, on the policy this file already applies to `assigned_to_id`:
+     * the one query that filters on it is the boot sweep, which runs once per
+     * process against a table this size. A "show me what failed" filter in the
+     * queue is what would justify one.
+     */
+    classification: ticketClassificationEnum("classification")
+      .default("skipped")
+      .notNull(),
 
     /**
      * The staff member who owns this ticket, or NULL for the unassigned pool

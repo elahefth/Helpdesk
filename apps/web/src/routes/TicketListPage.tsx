@@ -202,16 +202,28 @@ const columns: ColumnDef<typeof features, TicketSummary, unknown>[] = [
     id: "category" satisfies TicketSortKey,
     header: "Category",
     cell: ({ row }) => {
-      const category = row.original.category;
-      // The null is the feature — nothing classifies — so it renders as a
-      // stated absence rather than an empty cell that reads like a bug. The
-      // accessor above flattens it to "" because that value is never rendered
-      // or compared here; Postgres decides where the unclassified rows go.
-      return category ? (
-        <Badge variant="outline">{CATEGORY_LABELS[category]}</Badge>
-      ) : (
-        <span className="text-muted-foreground">unclassified</span>
-      );
+      const { category, classification } = row.original;
+      // The null still renders as a stated absence rather than an empty cell
+      // that reads like a bug. The accessor above flattens it to "" because
+      // that value is never rendered or compared here; Postgres decides where
+      // the unclassified rows go.
+      if (category) {
+        return <Badge variant="outline">{CATEGORY_LABELS[category]}</Badge>;
+      }
+      // The other reason a category can be missing, and the one the reader
+      // cannot otherwise tell from the permanent kind: classification runs
+      // after ingestion answers, so a ticket that arrived seconds ago has no
+      // category *yet*. Saying so is what stops a working classifier from
+      // looking like an absent one — and it is temporary, which the poll on the
+      // query below is what makes true on screen.
+      if (classification === "pending") {
+        return (
+          <span className="text-muted-foreground" aria-live="polite">
+            classifying…
+          </span>
+        );
+      }
+      return <span className="text-muted-foreground">unclassified</span>;
     },
   }),
   columnHelper.accessor((row): unknown => row.createdAt, {
@@ -361,6 +373,29 @@ export function TicketListPage() {
     // `nextCursor` is null on the last page; undefined is what switches
     // hasNextPage off.
     getNextPageParam: (last) => last.nextCursor ?? undefined,
+    /**
+     * Poll, but only while there is something on screen that is going to
+     * change on its own.
+     *
+     * Classification happens after ingestion answers, so a ticket can sit in
+     * the queue reading "classifying…" with the answer arriving a few seconds
+     * later and nothing to fetch it. Without this the row stays that way until
+     * the reader navigates or the window regains focus, which is the version
+     * where a working feature looks stuck.
+     *
+     * Gated on the page actually being *looked at* rather than on any page
+     * loaded: this is an infinite query, so a refetch re-fetches every page
+     * walked so far, and a pending row three pages back would put that on a
+     * five-second timer for nothing. In practice the window is the few seconds
+     * after an email lands; the rest of the time this is `false` and the query
+     * behaves exactly as it did.
+     */
+    refetchInterval: (query) =>
+      query.state.data?.pages[pageIndex]?.data.some(
+        (row) => row.classification === "pending",
+      )
+        ? 5_000
+        : false,
   });
 
   /**

@@ -6,10 +6,46 @@ import type { Database } from "../db/client.ts";
 import { ticket, user } from "../db/schema.ts";
 import { env } from "../env.ts";
 import { HttpError } from "../middleware/errors.ts";
+import type { ClassificationQueue } from "../ticket-classification.ts";
 import { toTicketDetail } from "./ticket-mappers.ts";
 
 /** The header a source presents INBOUND_EMAIL_SECRET in. */
 export const INBOUND_SECRET_HEADER = "x-inbound-secret";
+
+/**
+ * The header a source sets to say "do not classify this one".
+ *
+ * It is about *this delivery* rather than about the mail, which is why it is a
+ * header and not a field on `inboundEmailBodySchema`: that schema is the
+ * provider seam, the small intersection every webhook can produce, and a flag
+ * about our own background work has no business in it.
+ *
+ * It exists for bulk replay. `bun run seed:tickets` posts a hundred committed
+ * fixtures whose categories — including the ~18% deliberately left null — are
+ * part of what the corpus is *for*; classifying them would spend a model call
+ * per message and quietly erase the unclassified tail that the category sort's
+ * NULLS-last branch is checked against by eye. The same argument covers a
+ * forwarding script replaying an archive. It grants nothing and skips work, so
+ * it is not a privilege: a caller who can reach this endpoint at all already
+ * holds `INBOUND_EMAIL_SECRET`.
+ */
+export const SKIP_CLASSIFICATION_HEADER = "x-skip-classification";
+
+/**
+ * Whether a delivery asked to skip classification.
+ *
+ * Exported and pure for the reason `isAuthorizedSource` is — `env` and the
+ * queue are both out of reach of a test that cannot start a process with them
+ * configured. Two spellings accepted because both are what someone writes
+ * without checking, and the failure of guessing wrong is silent: a header that
+ * was meant to skip and did not costs a model call and a changed corpus, with
+ * nothing to say it was ignored.
+ */
+export function wantsClassificationSkipped(
+  header: string | undefined,
+): boolean {
+  return header === "1" || header?.toLowerCase() === "true";
+}
 
 /**
  * Compares the presented secret to the configured one in constant time.
@@ -53,7 +89,19 @@ export function isAuthorizedSource(
  * reason: `getDb()` may return undefined, and this route has to answer for that
  * rather than assume it.
  */
-export function createInboundEmailRouter(db: Database | undefined): Router {
+export function createInboundEmailRouter(
+  db: Database | undefined,
+  /**
+   * Where a newly created ticket goes to be categorised — after the response,
+   * never during it. `undefined` when the install has no model configured, in
+   * which case the row is written `skipped` and nothing is queued.
+   *
+   * A parameter rather than a module-level const, like the polisher on the
+   * tickets router: it is how a test hands in a fake, and how `index.ts` gets
+   * the same instance it calls `resume()` on.
+   */
+  classification?: ClassificationQueue,
+): Router {
   const router = Router();
 
   router.post("/inbound-email", async (req, res) => {
@@ -98,6 +146,20 @@ export function createInboundEmailRouter(db: Database | undefined): Router {
       ? new Date(email.receivedAt)
       : new Date();
 
+    /**
+     * Whether this delivery is the classifier's to look at.
+     *
+     * Three ways it is not, and they are all the same answer to the reader —
+     * "nothing was asked" — which is what `skipped` means. A source that stated
+     * its own category knows better than a model does; a source that asked to
+     * be left alone is replaying mail in bulk; and an install with no
+     * `OPENROUTER_API_KEY` has nothing to ask.
+     */
+    const classify =
+      !email.category &&
+      !wantsClassificationSkipped(req.header(SKIP_CLASSIFICATION_HEADER)) &&
+      Boolean(classification);
+
     const values = {
       subject: email.subject,
       studentName: email.fromName ?? null,
@@ -108,6 +170,16 @@ export function createInboundEmailRouter(db: Database | undefined): Router {
       // classifier to move it — see TICKET_STATUS_TRANSITIONS.
       status: "open" as const,
       category: email.category ?? null,
+      /**
+       * Written here, in the INSERT, rather than by the queue when it picks the
+       * job up. The row is therefore `pending` from the instant it exists —
+       * true in the 201 this request is about to send, true for a reader who
+       * refreshes the queue a millisecond later, and true if this process dies
+       * before the microtask below ever runs, which is precisely the case
+       * `resume()` recovers. A worker that marked its own jobs would leave a
+       * gap in which a brand-new ticket looks like one nobody will classify.
+       */
+      classification: classify ? ("pending" as const) : ("skipped" as const),
       sourceMessageId: email.messageId ?? null,
       receivedAt,
     };
@@ -125,8 +197,28 @@ export function createInboundEmailRouter(db: Database | undefined): Router {
 
     if (created) {
       // Explicitly unassigned: a ticket arrives in the unassigned pool,
-      // because nothing routes.
+      // because nothing routes. It is categorised below rather than here, for
+      // the same reason as ever: nothing *about the email* says which category
+      // it is, and a default would be a guess wearing a decision's clothes.
       res.status(201).json(toTicketDetail(created, null));
+
+      /**
+       * After the response, and that ordering is the feature.
+       *
+       * A model call takes seconds and is allowed sixty of them, which is not
+       * time a mail provider's webhook will wait — it would time out and
+       * redeliver, turning a slow classification into a duplicate delivery of
+       * mail that was already accepted. So the 201 goes out first and this
+       * hands the id to a queue that does its work on a later tick. `enqueue`
+       * is synchronous and returns before any of it starts; see
+       * `ticket-classification.ts`.
+       *
+       * Read off the row rather than off `classify`, so the queue and the
+       * column can never disagree about whether a job exists.
+       */
+      if (classification && created.classification === "pending") {
+        classification.enqueue(created.id);
+      }
       return;
     }
 

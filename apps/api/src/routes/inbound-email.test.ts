@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { isAuthorizedSource } from "./inbound-email.ts";
+import {
+  isAuthorizedSource,
+  wantsClassificationSkipped,
+} from "./inbound-email.ts";
 
 /**
  * `env` is parsed once at import, so a test cannot configure a secret and then
@@ -38,5 +41,37 @@ describe("isAuthorizedSource", () => {
   it("admits anything when no secret is configured", () => {
     expect(isAuthorizedSource(undefined, undefined)).toBe(true);
     expect(isAuthorizedSource("anything", undefined)).toBe(true);
+  });
+});
+
+/**
+ * The other header this endpoint reads, and pure for the same reason: the queue
+ * it governs needs a database and a model, neither of which a `bun test` run
+ * has.
+ *
+ * It fails quietly in the direction that costs something. A header meant to
+ * skip that is not recognised classifies a hundred fixtures anyway — a model
+ * call each, and the committed corpus's deliberate unclassified tail rewritten
+ * differently on every run, with nothing to say the flag was ignored.
+ */
+describe("wantsClassificationSkipped", () => {
+  it.each([
+    ["1", "1"],
+    ["true", "true"],
+    ["True", "True"],
+  ])("skips on %s", (_label, header) => {
+    expect(wantsClassificationSkipped(header)).toBe(true);
+  });
+
+  // Absent is the ordinary delivery: a real email from a real provider, which
+  // is exactly what the classifier is for.
+  it.each([
+    ["absent", undefined],
+    ["empty", ""],
+    ["0", "0"],
+    ["false", "false"],
+    ["anything else", "yes please"],
+  ])("classifies when the header is %s", (_label, header) => {
+    expect(wantsClassificationSkipped(header)).toBe(false);
   });
 });

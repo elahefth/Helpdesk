@@ -12,10 +12,24 @@ import { healthRouter } from "./routes/health.ts";
 import { createInboundEmailRouter } from "./routes/inbound-email.ts";
 import { createTicketsRouter } from "./routes/tickets.ts";
 import { createUsersRouter } from "./routes/users.ts";
+import {
+  createTicketClassification,
+  type ClassificationQueue,
+} from "./ticket-classification.ts";
 
 export interface CreateAppOptions {
   /** Test seam: inject an auth instance so the guard can be exercised without Postgres. */
   auth?: Auth;
+  /**
+   * Where newly ingested tickets go to be categorised, after their response has
+   * been sent.
+   *
+   * Injected rather than only built here because `index.ts` needs the *same*
+   * instance: it calls `resume()` on it at boot to re-queue whatever a previous
+   * process left pending. Defaulted so nothing else has to know, and so the
+   * absence of a model or a database is answered in one place.
+   */
+  classification?: ClassificationQueue;
 }
 
 /**
@@ -58,7 +72,13 @@ export function createApp(options: CreateAppOptions = {}): Express {
   // (the x-inbound-secret header) in place of one. Mounted at "/api" like the
   // routers below, so an unmatched /api path still falls through to them and on
   // to notFoundHandler.
-  app.use("/api", createInboundEmailRouter(db));
+  app.use(
+    "/api",
+    createInboundEmailRouter(
+      db,
+      options.classification ?? createTicketClassification(db),
+    ),
+  );
 
   // Everything else under /api is staff-only. The auth routes above already
   // terminated their own responses, so they never reach this guard.

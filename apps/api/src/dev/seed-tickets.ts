@@ -24,8 +24,17 @@
  * second, and the backdating pass is a set of absolute values rather than a
  * relative shift.
  *
+ * Classification is **off** by default, and that is the third place this script
+ * deliberately differs from a real delivery. The fixtures' categories are data:
+ * the ~18% left null are there so the category sort has a NULLS-last tail to
+ * prove itself on, and letting the classifier fill them in would spend a model
+ * call per unclassified fixture to destroy the property the corpus exists to
+ * demonstrate — differently on every run, since a model is not a fixture. Pass
+ * `--classify` to watch the real thing work on a hundred real emails.
+ *
  *   bun run seed:tickets
- *   bun run seed:tickets -- --reset   # delete every ticket first
+ *   bun run seed:tickets -- --reset      # delete every ticket first
+ *   bun run seed:tickets -- --classify   # let the AI classifier see them
  */
 import { eq, sql } from "drizzle-orm";
 import { inboundEmailBodySchema, type TicketStatus } from "@helpdesk/shared";
@@ -36,6 +45,7 @@ import { TICKET_FIXTURES, type TicketFixture } from "./ticket-fixtures.ts";
 
 const apiUrl = `http://localhost:${env.PORT}`;
 const reset = process.argv.includes("--reset");
+const classify = process.argv.includes("--classify");
 
 /** `<seed-007@fixtures.helpdesk.test>` — stable across runs, which is the point. */
 function messageIdFor(index: number): string {
@@ -123,6 +133,10 @@ for (const [index, fixture] of TICKET_FIXTURES.entries()) {
     headers: {
       "content-type": "application/json",
       ...(secret ? { "x-inbound-secret": secret } : {}),
+      // See the header's own note in routes/inbound-email.ts: a bulk replay of
+      // mail whose categories are already decided should not pay for a model
+      // call per message, nor rewrite a committed corpus's shape.
+      ...(classify ? {} : { "x-skip-classification": "1" }),
     },
     body: JSON.stringify(body),
   });

@@ -79,6 +79,18 @@ export function TicketDetailPage() {
       err instanceof ApiRequestError && err.status === 404
         ? false
         : failureCount < 1,
+    /**
+     * Poll only while the automatic classifier still owes this ticket an
+     * answer.
+     *
+     * Classification runs after ingestion responds, so a ticket opened moments
+     * after it arrived has a category on its way and no way to learn about it
+     * — the row is in the cache and nothing is going to fetch it again. The
+     * interval switches itself off as soon as the state leaves `pending`,
+     * which every outcome does: a category, a decline, or a failure.
+     */
+    refetchInterval: (query) =>
+      query.state.data?.classification === "pending" ? 4_000 : false,
   });
 
   const notFound =
@@ -371,6 +383,12 @@ function TicketControls({ ticket }: { ticket: TicketDetail }) {
           id="category"
           items={categoryItems}
           value={ticket.category ?? NONE}
+          // Deliberately *not* disabled while a classification is in flight,
+          // unlike the reply form during a polish. There is nothing to race:
+          // the API writes a human's category and marks the classifier's job
+          // closed in one statement, and the worker's own UPDATE is guarded on
+          // the ticket still being unclassified — so picking one here does not
+          // fight the model, it ends the question.
           disabled={isPending}
           onChange={(value) =>
             mutate({
@@ -381,6 +399,7 @@ function TicketControls({ ticket }: { ticket: TicketDetail }) {
             })
           }
         />
+        <ClassificationNote classification={ticket.classification} />
       </Control>
 
       <Control label="Assigned To" id="assignee">
@@ -415,6 +434,49 @@ function TicketControls({ ticket }: { ticket: TicketDetail }) {
       )}
     </aside>
   );
+}
+
+/**
+ * What the automatic classifier has to say about this ticket, when it has
+ * anything to say at all.
+ *
+ * Only two of the four states are worth a line. `pending` is the one the
+ * feature's whole shape depends on being visible — the category select reads
+ * "None" for a ticket whose answer is thirty seconds away, and without this
+ * that is indistinguishable from a ticket nobody will ever classify. `failed`
+ * is the other: the reader is looking at an empty category that *was* going to
+ * be filled in, and telling them it is now theirs is better than leaving them
+ * to wonder.
+ *
+ * `done` and `skipped` say nothing, on purpose. A category the model chose and
+ * a category a colleague chose are the same fact about the ticket, and
+ * labelling one of them would invite the reader to trust it less — or more —
+ * than the work in front of them warrants. There is no retry button for
+ * `failed` either: the select right above it is the fix, it takes one click,
+ * and it is the answer a human was going to have to give anyway.
+ */
+function ClassificationNote({
+  classification,
+}: {
+  classification: TicketDetail["classification"];
+}) {
+  if (classification === "pending") {
+    return (
+      <p className="text-sm text-muted-foreground" aria-live="polite">
+        Classifying automatically…
+      </p>
+    );
+  }
+
+  if (classification === "failed") {
+    return (
+      <p className="text-sm text-muted-foreground">
+        Could not be classified automatically. Pick one above.
+      </p>
+    );
+  }
+
+  return null;
 }
 
 /** A sidebar field: the label above its control, as in the mock. */

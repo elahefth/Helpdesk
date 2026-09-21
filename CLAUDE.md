@@ -30,7 +30,8 @@ bun run seed:admin     # -- --email=… --password=… --name=… --role=admin|a
 bun run email:send     # deliver a fixture email to the running API -> one ticket
                        # -- --from=… --from-name=… --subject=… --text=… --category=…
 bun run seed:tickets   # load the 100-ticket corpus (needs `bun run dev:api` up)
-                       # -- --reset   to clear the table first; idempotent otherwise
+                       # -- --reset      to clear the table first; idempotent otherwise
+                       # -- --classify   let the AI classifier see them (off by default)
 bun run seed:replies   # put a 20-message conversation on one ticket
                        # -- --ticket=<uuid> [--agent=<email>] [--reset]
 bun run reset:password # set a staff password out of band (forgotten admin)
@@ -90,9 +91,9 @@ preload that registers happy-dom *and* puts Bun's native `fetch` back, or the
 | shadcn/ui on Radix | shadcn/ui on **Base UI** (`@base-ui/react`) |
 | React Router 7 | React Router 8 |
 
-The implementation plan's phase numbering is still the shared vocabulary — code comments reference "Phase 6" and "Phase 7" to mark deliberate placeholders. Current state is roughly Phase 0 complete, Phase 4 (auth) landed early, and the plain half of Phase 5 (email → ticket) landed after it: `db/schema.ts` re-exports the auth tables plus `ticket`, `GET /api/tickets` reads real rows, and there is no worker, no AI, and no email *provider*.
+The implementation plan's phase numbering is still the shared vocabulary — code comments reference "Phase 6" and "Phase 7" to mark deliberate placeholders. Current state is roughly Phase 0 complete, Phase 4 (auth) landed early, and the plain half of Phase 5 (email → ticket) landed after it: `db/schema.ts` re-exports the auth tables plus `ticket`, `GET /api/tickets` reads real rows, and there is no email *provider*. There is no worker *process* either — the automatic classifier runs in-process, after the response; see Classification below.
 
-The domain vocabulary was cut down when ingestion landed, and `packages/shared/src/domain.ts` no longer matches project-scope.md: statuses are `open | resolved | closed` (no `new`, no `pending`) and categories are `general_questions | technical | refund_request`. Nothing classifies, so a longer list would only be filters that always return nothing. `TICKET_PRIORITIES` and `ROUTING_QUEUES` are still there, consumed by nothing, as the shape a later phase grows into.
+The domain vocabulary was cut down when ingestion landed, and `packages/shared/src/domain.ts` no longer matches project-scope.md: statuses are `open | resolved | closed` (no `new`, no `pending`) and categories are `general_questions | technical | refund_request`. The short category list is now load-bearing in a second way: it is the closed set the classifier picks from, and `classify-ticket.ts` builds its prompt out of `TICKET_CATEGORIES` so a fourth category is offered to the model in the same commit that makes the column able to hold it. `TICKET_PRIORITIES` and `ROUTING_QUEUES` are still there, consumed by nothing, as the shape a later phase grows into.
 
 ## Architecture
 
@@ -140,14 +141,15 @@ Staff-only console: students never log in. Sessions live in the `session` table 
 
 ### Ingestion — email becomes a ticket
 
-`POST /api/inbound-email` is the whole of it. One delivered email becomes one `ticket` row; there is no worker, no queue, and no classifier. The `ticket_reply` table beside it holds the *outbound* half — see Replies below — and is not an inbound message table: a student's reply still opens a new ticket.
+`POST /api/inbound-email` is the whole of it. One delivered email becomes one `ticket` row, synchronously; there is no worker process and no broker. A classifier *does* run now, but never inside the request — see Classification below. The `ticket_reply` table beside it holds the *outbound* half — see Replies below — and is not an inbound message table: a student's reply still opens a new ticket.
 
 - **It is the API's only unauthenticated write, and necessarily so.** Whatever delivers the mail — a provider webhook, a forwarding script, `bun run email:send` — holds no session and never will. It is mounted at `/api` *above* `requireAuth` in `app.ts` for that reason, and `INBOUND_EMAIL_SECRET` presented as `x-inbound-secret` stands in for the session. That secret is optional in development (a local `curl` should not need a ceremony) and `env.ts` refuses to boot in production without one, exactly like `BETTER_AUTH_SECRET`. The comparison lives in the exported pure function `isAuthorizedSource` because `env` is parsed once at import — a test cannot configure a secret and then make a request against it, so the guard has to be reachable some other way, and an untested guard on the one open write is not worth having.
 - **`inboundEmailBodySchema` is the provider seam, not a provider payload.** It is the small intersection every provider can produce; a Mailgun or SES adapter's entire job becomes mapping its webhook onto this shape and posting it, so nothing downstream ever sees a provider-shaped object. It is `strictObject` for a sharper reason than the user writes: a plain `z.object` strips unknown keys, so an adapter that spelled the body `bodyText` would have the email's contents silently dropped and still be answered 201.
 - **`SUPPORT_EMAIL` is enforced, not decorative.** The route answers 422 `wrong_recipient` for mail addressed elsewhere, which is what keeps this from being an open "create a ticket about anything" endpoint. Both sides are lowercased — the schema's `to` field and `env.ts`'s value — or a provider that capitalises the address would have every delivery refused.
 - **`source_message_id` is UNIQUE, and that is the idempotency.** Insert is `onConflictDoNothing` on that column, in one statement: a provider retrying a slow webhook is the normal case, and SELECT-then-INSERT would lose that race. A conflicting delivery is answered **200 with the existing ticket** rather than 409 — the mail *was* accepted, the first time. `messageId` is optional because not every source has one, and Postgres treats NULLs as distinct under a unique index, so unidentified mail is simply never deduplicated rather than colliding with the last such row.
 - **`student_name` is nullable and is never an identity.** It is the display name half of `From: "Ada Student" <ada@example.com>`, and splitting the header is the *adapter's* job — RFC 5322 allows quoted strings, escapes and RFC 2047 encoded words in there, and a regex over the raw header does not belong in a package the browser also imports. Null for mail that carried a bare address and for every ticket ingested before the column existed, so a renderer must always fall back to `student_email` — which is the column `ticket_student_email_idx` groups by, because two people can share a display name and one person can change theirs between emails.
-- **`category` is nullable and nothing infers it.** Only a source that genuinely knows (a category-specific alias, a web form) may state one. A default would be a guess indistinguishable from a decision to everyone downstream; the SPA renders the null as "unclassified".
+- **`category` is nullable and the route itself still infers nothing.** A source that genuinely knows (a category-specific alias, a web form) may state one, and that is the only way a category is set before the 201. Everything else is left to the background classifier, which writes to the same nullable column after the fact and may decline — so null stays the honest arrival state, and a default would still be a guess indistinguishable from a decision. The SPA renders the null as "unclassified", or "classifying…" while an answer is outstanding.
+- **`x-skip-classification: 1` turns the classifier off for one delivery**, and is a header rather than a field on `inboundEmailBodySchema` because that schema is the provider seam and a flag about our own background work has no business in it. It exists for bulk replay: `bun run seed:tickets` sets it, because the corpus's ~18% unclassified tail is data the category sort is checked against and filling it in would cost a model call per fixture to destroy the property — differently on every run, since a model is not a fixture. `--classify` opts back in.
 - **`ticket` timestamps are `timestamptz`**, unlike the generated auth tables, which are not. The list pages on `created_at`/`updated_at` with a keyset cursor, and the driver round-tripping a naive timestamp through the host's local offset would silently skip or repeat rows at every page boundary. `received_at` is separate from `created_at` on purpose: replaying an archive must not make every ticket look like it arrived today.
 - **Ticket sorting is server-side, and `routes/ticket-sort.ts` is the whole of it.** One `SORTS` table holds, per `TicketSortKey`, the SQL expression, whether it is nullable, how to read a cursor value off a row, and how to bind one back. The ORDER BY and the keyset predicate are built from the *same* expression — they have to be, or the two queries that make up a page boundary disagree about where it was. Four things there are load-bearing:
   - **Search (`?q=`) is a filter, not a mode.** It joins `status` and `category` in the one `filters` predicate, which is what keeps `total` — and therefore the page counter — describing the queue the reader is actually looking at. It matches with `ilike` across the subject, sender name, sender email **and body**; the body is included so "the one about the double charge" is findable when that phrase only ever appears inside the email, at the cost of results whose row shows nothing explaining the match. Highlighting is the fix, and it wants a ticket detail view first. `ilike` rather than `lower() like lower()` because it is the form a `pg_trgm` GIN index can serve later; today it scans, deliberately.
@@ -160,6 +162,109 @@ Staff-only console: students never log in. Sessions live in the `session` table 
 - **The seeded corpus is 100 committed fixtures, delivered over HTTP.** `dev/ticket-fixtures.ts` holds them and `dev/seed-tickets.ts` posts each one to `POST /api/inbound-email` with a deterministic Message-ID, so a rerun is idempotent by the same unique index a retrying provider hits. It then writes `created_at`, `updated_at` and `status` **directly**, which is the one place anything reaches around the API: ingestion stamps `created_at` with the row default and every ticket is born `open`, and the corpus predates `PATCH /api/tickets/:id` — without the fix-up all hundred tickets would have been created this afternoon and none would ever have been resolved, which makes the date sort and the status filter impossible to check by eye. That route now takes `status`, so the status half *could* move — but it would be 100 extra HTTP round trips and the timestamps would still need the direct write, so the one statement stays. It does mean the seeded statuses bypass `canTransition`, which is deliberate: the corpus needs closed tickets that were never walked through a lifecycle.
 - **The corpus's spread is load-bearing, and `dev/ticket-fixtures.test.ts` pins it.** Subjects start across the whole alphabet, senders repeat and nine carry no display name, ~18% are unclassified, statuses skew with age, and `daysAgo` is irregular with a few same-day collisions. Each of those exists because a corpus that is uniform in one column makes that column's sort look broken rather than look sorted — the same-day rows, for instance, are the only thing that exercises the cursor's id tiebreaker from the UI.
 - **`apps/api/src/dev/send-inbound-email.ts` is the only source there is.** It posts the same normalised payload a real adapter would, to the same endpoint, so it exercises the real path rather than a test double — which is why there is no `EmailSource` interface yet: it would describe an integration nobody has written.
+
+### Classification — the category fills itself in, after the response
+
+`apps/api/src/ai/classify-ticket.ts` (the prompt) and
+`apps/api/src/ticket-classification.ts` (when it runs). One delivered email goes
+to a model and comes back as one of the three categories, or as nothing. There
+is no button and no route: it is a consequence of ingestion.
+
+- **It is non-blocking, and the ordering is the feature.** `POST
+  /api/inbound-email` writes the row, answers 201 in single-digit milliseconds,
+  and *then* hands the id to an in-process queue. A model call takes seconds and
+  is allowed sixty of them (`TIMEOUT_MS`), which is not time a mail provider's
+  webhook will wait — it times out and redelivers, so a slow classification
+  inside the request would turn into a duplicate delivery of mail that was
+  already accepted. `enqueue` is synchronous, returns before any work starts,
+  and returns `void` rather than a promise precisely so a caller cannot be
+  tempted to await it.
+- **`ticket.classification` is the state, and it is not derivable from
+  `category`.** A ticket with no category might be one the model has not reached
+  yet, one it read and declined to place, one it could not be reached about, or
+  one nobody ever tried to classify — four different things to do about it, and
+  rendering all four as "unclassified" is what makes a classifier that runs
+  *after* the response indistinguishable from one that is broken. Hence
+  `skipped | pending | done | failed`; see `TICKET_CLASSIFICATIONS` for what
+  each one means. Note `done` does **not** imply a category: declining is a
+  successful answer.
+- **The column defaults to `skipped`, not `pending`**, which is what keeps the
+  migration honest: every ticket that predates the column reads as "nobody
+  asked" rather than as a hundred jobs queued against a classifier that will
+  never run — and the boot sweep would otherwise pick all of them up and spend a
+  model call each. Ingestion writes `pending` **in the INSERT**, so the row is
+  pending from the instant it exists: true in the 201, true for a reader who
+  refreshes a millisecond later, and true if the process dies before the
+  microtask ever runs.
+- **`classification` is on `ticketSummarySchema`, not the detail** — the
+  opposite call to the assignee's, and for the opposite reason. It costs no
+  join, it is already on the row, and the queue is exactly where it has to be
+  readable: the first thing anyone sees of a new ticket is a list row with no
+  category.
+- **The queue is in-memory and in-process, deliberately.** No Redis, no outbox,
+  no worker process; introducing one for a single model call per email would be
+  infrastructure bought against a load nobody has. What stands in for durability
+  is that the *state* is in Postgres even though the queue is not, so a process
+  that dies mid-flight leaves a true fact behind rather than a lost job, and
+  `resume()` on the next boot re-queues every `pending` row. What is genuinely
+  given up is exactly-once across replicas — two API processes sharing a
+  database can both classify one ticket, costing a wasted call and writing the
+  same value twice. `SELECT … FOR UPDATE SKIP LOCKED` over an outbox is the
+  shape that fixes it, and the day this runs on more than one process is the day
+  it is worth it.
+- **`resume()` is called from `index.ts` and never from `createApp`.** Owning
+  the backlog is a statement about being *the server process*, not about having
+  built an Express app — a sweep inside the factory would mean every
+  `createApp()` in the test suite quietly claiming a production backlog. It is
+  not awaited before `listen` either: a slow query there would delay the port
+  opening, and an old ticket waiting a few more seconds is not worth a health
+  check failing over.
+- **Every write is guarded on `classification = 'pending'` AND a null
+  category**, not just on the id. Between a job being queued and a model
+  answering, an agent can open the ticket and categorise it themselves; an
+  unguarded UPDATE would overwrite a human's decision with a machine's some
+  seconds later, with nothing on screen to explain it. The other half of that
+  rule lives in `PATCH /api/tickets/:id`, which writes `classification:
+  "skipped"` in the same statement as any category change — without it the row
+  stays `pending` forever, because the guarded UPDATE correctly refuses to move
+  it and nothing else would.
+- **`updatedAt` is written back explicitly, and it looks redundant.** The column
+  is `$onUpdate` and the queue's default sort is `updated_at desc`, so leaving
+  it out of `.set()` restamps it with `now()` — a boot sweep classifying a
+  week-old backlog would silently drag all of it to the top of everyone's queue.
+  Classification is something that happened to the *record* of a ticket, not
+  activity on the ticket. `dev/seed-tickets.ts` restates the column for the same
+  reason.
+- **The dedupe set holds in-flight ids, not just waiting ones.** `resume()`
+  reads every row still `pending`, and a ticket being classified right now is
+  one of them — the worker has not written its answer yet. Dropping an id when
+  it comes *off* the queue rather than when its job *ends* leaves exactly that
+  window open. A unit test pins it, because it is one wasted model call and
+  nothing else: no error, no wrong value.
+- **Concurrency is 1.** The thing on the other end is a shared free-tier pool
+  that throttles — the reason `OPENROUTER_MODEL` is a chain at all — and the
+  only burst this ever sees is a bulk replay, where fanning out turns every
+  request into a 429 and every ticket into `failed`. Serial, a backlog takes as
+  long as it takes and nothing is waiting on it.
+- **One attempt per ticket, and no retry button.** The model chain in
+  `openrouter.ts` already *is* the retry strategy, and re-asking a pool that
+  just refused is what `maxRetries: 0` exists to avoid. A `failed` ticket is
+  answered by the category select on the detail page, which takes one click and
+  is the answer a human was going to have to give anyway; the SPA says so in as
+  many words rather than leaving the reader to wonder whether something is still
+  running.
+- **The SQL sits behind `ClassificationStore`**, which is why any of the above
+  is testable: `bun run test` runs with `DATABASE_URL` stripped, so a worker
+  holding a `Database` would be reachable only by the parts that do not touch
+  it — which is none of them. Same instinct as `isAuthorizedSource` and
+  `searchPattern` being exported pure functions.
+- **The SPA polls, but only while something on screen will change on its own.**
+  `TicketDetailPage` refetches every 4s while its ticket is `pending`;
+  `TicketListPage` every 5s while *the page being looked at* holds a pending row
+  — gated on the visible page rather than any loaded page, because it is an
+  infinite query and a refetch re-fetches every page walked so far. Both switch
+  themselves off as soon as the state leaves `pending`, which every outcome
+  does.
 
 ### Ticket updates — status, category, assignee
 
@@ -348,18 +453,26 @@ member of staff said back.
 
 ### Where a model runs
 
-Two features, one core. `apps/api/src/ai/openrouter.ts` holds everything about
+Three features, one core. `apps/api/src/ai/openrouter.ts` holds everything about
 *reaching* a model — the fallback chain, the batching, the one shared deadline,
 the translation of a provider failure into a sentence an agent can act on — and
 exports `createTextGenerator()`, which is `undefined` when no key is configured.
 Each feature beside it owns only what makes it that feature: its instructions,
 its prompt, its temperature and its length ceiling. That split arrived with the
-summariser; everything under "Reply polishing" that is about the provider now
-lives in the core and is shared by both. A third feature should be a third
-prompt file, never a second copy of the batch walk — the trap in
+summariser and held when the classifier landed as the third: everything about
+the provider lives in the core and is shared by all three. A fourth feature is
+a fourth prompt file, never a second copy of the batch walk — the trap in
 `OPENROUTER_MODELS_PER_REQUEST` below fails *every* request and reports itself
 as a generic call error, and a missed copy of it is a button that has never
 worked.
+
+The classifier is the one of the three with **no route and no reader**. The
+other two answer a button press, so a provider failure becomes a 502 with a
+sentence in it; this one runs off the back of ingestion and writes to a column,
+so its failures are a state on the row (`failed`) rather than a message, and its
+mistakes are a category that looks exactly like a correct one. That is why its
+prompt is the strictest of the three about declining, and why `parseAnswer`
+refuses anything that is not one of four exact words.
 
 ### Reply polishing
 

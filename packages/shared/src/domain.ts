@@ -70,6 +70,40 @@ export const CATEGORY_LABELS: Record<TicketCategory, string> = {
   refund_request: "Refund Request",
 };
 
+/**
+ * What the automatic classifier did with a ticket — which is a different
+ * question from what category it ended up in, and the queue needs both.
+ *
+ * `category` alone cannot answer it. A ticket with no category might be one the
+ * model has not reached yet, one it looked at and declined to place, one it
+ * could not reach a model to ask about, or one nobody ever tried to classify —
+ * and those call for four different things from the person reading the queue.
+ * Rendering all four as "unclassified" is what makes a classifier that runs
+ * *after* the response indistinguishable from one that is broken.
+ *
+ * - `skipped` — nothing was asked. The column's default, so every ticket that
+ *   predates the classifier reads as this rather than as a job stuck pending;
+ *   also the state of a delivery that stated its own category, of an install
+ *   with no model configured, and of a ticket whose category a human has since
+ *   decided. It is the terminal "the classifier is not the author of this".
+ * - `pending` — queued, or in flight. Written by ingestion in the same INSERT
+ *   that creates the row, so it is true from the moment the ticket exists and
+ *   not from whenever a background worker got to it.
+ * - `done` — the model answered. With a category, or with "I cannot tell",
+ *   which is why `done` does not imply `category` is set.
+ * - `failed` — the model was asked and could not answer: unreachable,
+ *   throttled past the fallback chain, or replying with something that is not a
+ *   category. The one state where asking again might help.
+ */
+export const TICKET_CLASSIFICATIONS = [
+  "skipped",
+  "pending",
+  "done",
+  "failed",
+] as const;
+export const ticketClassificationSchema = z.enum(TICKET_CLASSIFICATIONS);
+export type TicketClassification = z.infer<typeof ticketClassificationSchema>;
+
 export const TICKET_PRIORITIES = ["low", "normal", "high", "urgent"] as const;
 export const ticketPrioritySchema = z.enum(TICKET_PRIORITIES);
 export type TicketPriority = z.infer<typeof ticketPrioritySchema>;
