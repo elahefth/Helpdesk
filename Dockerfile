@@ -36,10 +36,15 @@ COPY apps/api/package.json apps/api/
 COPY apps/web/package.json apps/web/
 COPY packages/shared/package.json packages/shared/
 COPY e2e/package.json e2e/
-# No devDependencies: vite, drizzle-kit and playwright stay in the build stage.
-# Migrations run through drizzle-orm's own migrator (src/migrate.ts), which is
-# a runtime dependency already.
-RUN bun install --frozen-lockfile --production --ignore-scripts
+# Only what the API needs at runtime. `--filter` is the half that matters:
+# `--production` alone still installs every workspace's dependencies — React,
+# Base UI and lucide for a frontend that is already compiled into dist —
+# and measured at twice the size. Migrations run through drizzle-orm's own
+# migrator (src/migrate.ts), so drizzle-kit is not needed either. A few dev
+# packages (vite, vitest) still land in the store as better-auth's optional
+# peers; nothing imports them.
+RUN bun install --frozen-lockfile --production --ignore-scripts \
+      --filter '@helpdesk/api'
 
 # Source, not a bundle: Bun runs TypeScript directly, @helpdesk/shared is
 # consumed as source, and apps/api needs its drizzle/ migrations and
