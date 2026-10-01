@@ -30,14 +30,18 @@ function signedInAs(role: UserRole) {
 }
 
 /**
- * Renders the layout at "/" with a stub for the readiness badge's query. The
- * badge fetches on mount and is not what any of this is about, so it gets a
- * response that never resolves rather than an unstubbed-request rejection.
+ * Renders the layout with a stub `fetch`. By default every request hangs: the
+ * readiness badge and the sidebar counts both fetch on mount, and neither is
+ * what most of these tests are about, so they get a response that never
+ * resolves rather than an unstubbed-request rejection.
  */
-function renderLayout() {
+function renderLayout(
+  initialEntry = "/",
+  fetchImpl: (url: string) => Promise<Response> = () => new Promise(() => {}),
+) {
   vi.stubGlobal(
     "fetch",
-    vi.fn(() => new Promise<Response>(() => {})),
+    vi.fn((input: RequestInfo | URL) => fetchImpl(String(input))),
   );
 
   const queryClient = new QueryClient({
@@ -46,7 +50,7 @@ function renderLayout() {
 
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={["/"]}>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <Routes>
           <Route element={<AppLayout />}>
             <Route index element={<p>queue</p>} />
@@ -63,21 +67,26 @@ afterEach(() => {
 });
 
 describe("AppLayout nav", () => {
-  it("offers an admin both destinations", () => {
+  it("offers an admin every queue view and both pages", () => {
     signedInAs("admin");
     renderLayout();
 
     const nav = screen.getByRole("navigation");
-    expect(within(nav).getByRole("link", { name: "Tickets" })).toBeDefined();
+    for (const name of [/Needs a human/, /Handled by AI/, /All tickets/]) {
+      expect(within(nav).getByRole("link", { name })).toBeDefined();
+    }
+    expect(within(nav).getByRole("link", { name: "Dashboard" })).toBeDefined();
     expect(within(nav).getByRole("link", { name: "Users" })).toBeDefined();
   });
 
-  it("offers an agent Tickets but not Users", () => {
+  it("offers an agent the queue but not Users", () => {
     signedInAs("agent");
     renderLayout();
 
     const nav = screen.getByRole("navigation");
-    expect(within(nav).getByRole("link", { name: "Tickets" })).toBeDefined();
+    expect(
+      within(nav).getByRole("link", { name: /Needs a human/ }),
+    ).toBeDefined();
     expect(within(nav).queryByRole("link", { name: "Users" })).toBeNull();
   });
 
@@ -88,45 +97,87 @@ describe("AppLayout nav", () => {
   });
 
   /**
-   * The layout the request was about: both links on the left, grouped with the
-   * wordmark rather than with the session controls.
-   *
-   * Asserted as containment, not document order — the header is
-   * `justify-between` with a group at each end, so a nav moved to the right
-   * still *follows* the wordmark and still *precedes* the sign-out button. An
-   * order check passes on both layouts and tests nothing; which group the nav
-   * shares a parent with is the difference between them.
-   *
-   * Not asserted on class names either, so a restyle does not fail this.
+   * The nav sits in the sidebar with the wordmark; the session controls sit in
+   * the top bar. Asserted as containment rather than document order or class
+   * names, so a restyle does not fail this and a nav that wandered into the
+   * top bar does.
    */
-  it("groups the nav with the wordmark on the left, away from the session controls", () => {
+  it("groups the nav with the wordmark, away from the session controls", () => {
     signedInAs("admin");
     renderLayout();
 
-    const header = screen.getByRole("banner");
-    const nav = within(header).getByRole("navigation");
-    const wordmark = within(header).getByRole("link", { name: "Helpdesk" });
-    const signOut = within(header).getByRole("button", { name: "Sign out" });
+    const nav = screen.getByRole("navigation");
+    const wordmark = screen.getByRole("link", { name: "Helpdesk" });
+    const signOut = screen.getByRole("button", { name: "Sign out" });
 
-    const leftGroup = nav.parentElement;
-    expect(leftGroup).not.toBeNull();
-    expect(leftGroup?.contains(wordmark)).toBe(true);
-    expect(leftGroup?.contains(signOut)).toBe(false);
+    const sidebar = nav.parentElement;
+    expect(sidebar).not.toBeNull();
+    expect(sidebar?.contains(wordmark)).toBe(true);
+    expect(sidebar?.contains(signOut)).toBe(false);
   });
 
-  it("marks the current destination for assistive tech", () => {
+  /**
+   * All three views live at "/", so `NavLink`'s pathname match would mark
+   * every one of them current at once. The active view is read off
+   * `?handled=`, the way the queue itself reads it.
+   */
+  it("marks the default view current at a bare /", () => {
     signedInAs("admin");
     renderLayout();
 
-    // At "/", Tickets is the active link and Users is not — `end` on the
-    // Tickets NavLink is what keeps it from also matching /users.
+    const current = (name: RegExp | string) =>
+      screen.getByRole("link", { name }).getAttribute("aria-current");
+
+    expect(current(/Needs a human/)).toBe("page");
+    expect(current(/Handled by AI/)).toBeNull();
+    expect(current(/All tickets/)).toBeNull();
+    expect(current("Users")).toBeNull();
+  });
+
+  it("marks the view the query string names", () => {
+    signedInAs("admin");
+    renderLayout("/?handled=ai&status=open");
+
     expect(
       screen
-        .getByRole("link", { name: "Tickets" })
+        .getByRole("link", { name: /Handled by AI/ })
         .getAttribute("aria-current"),
     ).toBe("page");
     expect(
-      screen.getByRole("link", { name: "Users" }).getAttribute("aria-current"),
+      screen
+        .getByRole("link", { name: /Needs a human/ })
+        .getAttribute("aria-current"),
     ).toBeNull();
+  });
+
+  /**
+   * The counts are the list endpoint's own `total` for each view, so the
+   * sidebar cannot describe a different "Needs a human" than the page does.
+   */
+  it("shows each view's count from the list endpoint's total", async () => {
+    signedInAs("admin");
+    const totals: Record<string, number> = { human: 42, ai: 58, all: 100 };
+    renderLayout("/", (url) => {
+      const handledBy = new URL(url, "http://x").searchParams.get("handledBy");
+      if (!handledBy) return new Promise(() => {});
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            data: [],
+            nextCursor: null,
+            total: totals[handledBy],
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      );
+    });
+
+    expect(
+      await screen.findByRole("link", { name: "Handled by AI 58" }),
+    ).toBeDefined();
+    expect(
+      screen.getByRole("link", { name: "Needs a human 42" }),
+    ).toBeDefined();
+    expect(screen.getByRole("link", { name: "All tickets 100" })).toBeDefined();
   });
 });

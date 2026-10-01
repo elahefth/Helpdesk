@@ -1,8 +1,9 @@
-import type {
-  TicketDetail,
-  TicketReply,
-  TicketSummary,
-  User,
+import {
+  TICKET_PREVIEW_LENGTH,
+  type TicketDetail,
+  type TicketReply,
+  type TicketSummary,
+  type User,
 } from "@helpdesk/shared";
 import type { ticket, ticketReply, user } from "../db/schema.ts";
 
@@ -25,6 +26,7 @@ export function toTicketSummary(row: TicketRow): TicketSummary {
     subject: row.subject,
     studentName: row.studentName,
     studentEmail: row.studentEmail,
+    preview: ticketPreview(row.body),
     status: row.status,
     category: row.category,
     classification: row.classification,
@@ -33,6 +35,23 @@ export function toTicketSummary(row: TicketRow): TicketSummary {
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+/**
+ * The first `TICKET_PREVIEW_LENGTH` characters of an email, as one line.
+ *
+ * Whitespace is collapsed first because email bodies open with "Hi,\n\n" and a
+ * preview that keeps the newlines renders the greeting and nothing else. Cut by
+ * code point (`Array.from`) rather than by UTF-16 unit, so an emoji at the
+ * boundary is dropped whole instead of leaving half a surrogate pair that
+ * renders as a replacement box.
+ */
+export function ticketPreview(body: string): string {
+  const flat = body.replace(/\s+/g, " ").trim();
+  const chars = Array.from(flat);
+  return chars.length <= TICKET_PREVIEW_LENGTH
+    ? flat
+    : chars.slice(0, TICKET_PREVIEW_LENGTH).join("").trimEnd();
 }
 
 /**

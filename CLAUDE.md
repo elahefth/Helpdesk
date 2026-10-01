@@ -417,13 +417,17 @@ twice, seconds apart — and a ticket it has answered is done.
   `autoResolution: "skipped"` alongside any change for the same reason —
   otherwise a ticket an agent just assigned to themselves would vanish from the
   queue they assigned it in.
-- **The SPA's `Showing` select is what takes the hidden rows back** — "Needs a
-  human" (default), "Handled by AI", "All" — in the URL as `?handled=`, like
-  every other piece of queue state. Without it those rows are filtered by a rule
-  with nothing on screen to explain it, which is not a hidden row but a lost
-  one. The empty state names the filter for the same reason: "no tickets match
-  that filter" beside three controls reading All is how a reader concludes the
-  queue is broken.
+- **The sidebar's queue views are what take the hidden rows back** — "Needs a
+  human" (default, a bare `/`), "Handled by AI", "All tickets" — in the URL as
+  `?handled=`, like every other piece of queue state, each with its live count.
+  Without them those rows are filtered by a rule with nothing on screen to
+  explain it, which is not a hidden row but a lost one. The counts are three
+  `GET /api/tickets?handledBy=…&limit=1` requests reading `total`, keyed under
+  `["tickets", "count", …]` — the same filters as the page, so the sidebar and
+  the page counter cannot disagree, and the prefix invalidate a PATCH already
+  does refreshes them. The page heading names the view, and the empty state
+  names the hidden view for the same reason: "no tickets match that filter"
+  beside controls reading All is how a reader concludes the queue is broken.
 - **The row marker is deliberately sparse.** `by AI` for `resolved` and
   `AI unavailable` for `failed`; nothing for `skipped` or `escalated`. Escalated
   is the *ordinary* outcome of a working assistant, so a badge on it would sit
@@ -987,9 +991,10 @@ it so the two cannot describe different moments.
   chart dependency is worth adding the day this needs a second series, a time
   axis that skips weekends, or interpolation — none of which is a bar per day.
 - **One series, so no legend** — the card title names the bars. The fill is
-  `bg-primary`, **not** the theme's `--chart-1`: that token is `oklch(0.87 0 0)`
-  in *both* light and dark, which is near-invisible on a white card. `--primary`
-  is the one that actually differs per mode.
+  `bg-primary`, not the theme's `--chart-1`. Under shadcn's stock palette that
+  token was `oklch(0.87 0 0)` in *both* modes, near-invisible on a white card;
+  the Workbench palette now sets it to the accent too, but `--primary` is the
+  token whose per-mode contrast is actually designed.
 - **A nonzero day always has a mark; an empty day never does.** A count of 1
   against a busy day's scale is a sub-pixel bar, so bars carry a 2px
   `min-height` — the difference between "one ticket" and "none" is the one this
@@ -1023,7 +1028,9 @@ it so the two cannot describe different moments.
 
 Routing is defined in one place, `apps/web/src/main.tsx`. `/login` sits outside the layout; **everything else nests under `RequireAuth`** so a new route is protected by default. `RequireAdmin` nests inside that for admin-only screens.
 
-The queue lives at the index route, `/`, and the nav links to it with `end` — there is no separate `/tickets` path, because one screen with two URLs is a thing to keep in sync for no gain. `/dashboard` sits beside it and needs no `end`: it has no children, so there is nothing for the active state to over-match. `MainNav` in `AppLayout.tsx` sits on the left with the wordmark; the right-hand group is about the session (environment, identity) rather than the app. `AppLayout.test.tsx` asserts that as *containment*, not document order: the header is `justify-between`, so a nav moved to the right still follows the wordmark and still precedes the sign-out button — an order check passes on both layouts and tests nothing.
+The queue lives at the index route, `/`, and the nav links to it with `end` — there is no separate `/tickets` path, because one screen with two URLs is a thing to keep in sync for no gain. `/dashboard` sits beside it and needs no `end`: it has no children, so there is nothing for the active state to over-match. `MainNav` in `AppLayout.tsx` lives in a left sidebar with the wordmark (folding into a scrolling strip below `md`); the top bar is about the session (environment, identity) rather than the app. `AppLayout.test.tsx` asserts that as *containment*, not document order or class names. The three queue views all live at `/`, so they are plain `Link`s with `aria-current` computed from `?handled=` — `NavLink` matches on pathname alone and would mark all three current at once.
+
+**The look is the "Workbench" direction**: Onest (`@fontsource-variable/onest`) as the one family, slate neutrals with a blue bias, one cobalt accent meaning "open work / where you are", and two semantic tokens beside it that are not accents — `--caution` (refund requests, the category with money attached) and `--overdue` (an open ticket older than `OVERDUE_AFTER_DAYS`, a display judgement, not an SLA). All tokens live in `index.css`; dark mode is the `.dark` block, applied from the OS preference by `index.html`. Queue rows carry a one-line `preview` of the email, cut server-side by `ticketPreview` in `ticket-mappers.ts` so the list still never ships whole bodies.
 
 `TicketListPage` and `UsersPage` are the same screen twice — a `useInfiniteQuery` over the keyset cursor, a "Load more" button, and a skeleton that renders the real `<thead>` so column widths do not shift — but they no longer share a table layer. `UsersPage` stays hand-rolled markup; `TicketListPage` runs on **TanStack Table v9**, which is where sorting arrived. Port `UsersPage` when it needs one, not before.
 

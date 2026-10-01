@@ -81,6 +81,18 @@ export const ticketSummarySchema = z.object({
    */
   studentName: z.string().nullable(),
   studentEmail: z.string().email(),
+  /**
+   * The opening of the email, whitespace collapsed and cut at
+   * `TICKET_PREVIEW_LENGTH` characters — see `ticketPreview` in the API.
+   *
+   * It is the answer to the note under this schema: the list still does not
+   * ship whole emails, but a subject alone is often not enough to triage by
+   * ("cant login", "Question"), and the first line of the body usually is. Cut
+   * on the server so a page costs a few hundred bytes a row, not a few
+   * kilobytes. It does not say whether it was cut; a renderer that needs the
+   * whole thing opens the ticket.
+   */
+  preview: z.string(),
   status: ticketStatusSchema,
   category: ticketCategorySchema.nullable(),
   /**
@@ -117,8 +129,9 @@ export type TicketSummary = z.infer<typeof ticketSummarySchema>;
 
 /**
  * The list deliberately does not carry `body`: a page of 25 tickets would then
- * ship 25 full emails to render 25 subject lines. Fetching one is what
- * GET /api/tickets/:id is for.
+ * ship 25 full emails to render 25 subject lines. It carries `preview`, the
+ * first line or so, and fetching the whole email is what GET /api/tickets/:id
+ * is for.
  */
 export const ticketDetailSchema = ticketSummarySchema.extend({
   body: z.string(),
@@ -151,6 +164,12 @@ export type TicketDetail = z.infer<typeof ticketDetailSchema>;
  * claimed, twenty delivered.
  */
 export const TICKET_PAGE_SIZE = 10;
+
+/**
+ * How much of an email `TicketSummary.preview` carries: about one line of the
+ * queue at desktop width, with room for the renderer to ellipsis it.
+ */
+export const TICKET_PREVIEW_LENGTH = 160;
 
 /**
  * The columns `GET /api/tickets` will sort by, and the ids the ticket table's

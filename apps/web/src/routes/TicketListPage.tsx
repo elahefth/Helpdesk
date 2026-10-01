@@ -15,7 +15,6 @@ import {
   CATEGORY_LABELS,
   TICKET_CATEGORIES,
   TICKET_HANDLER_LABELS,
-  TICKET_HANDLERS,
   TICKET_PAGE_SIZE,
   TICKET_STATUSES,
   ticketCategorySchema,
@@ -28,12 +27,19 @@ import {
   type TicketStatus,
   type TicketSummary,
 } from "@helpdesk/shared";
-import { ArrowDown, ArrowUp, ChevronsUpDown, Search, X } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsUpDown,
+  Search,
+  X,
+} from "lucide-react";
 import { listTickets } from "../lib/api.ts";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -61,18 +67,42 @@ const CATEGORY_ITEMS = [
 ];
 
 /**
- * No "All" entry of its own: `all` is one of the three handlers, so the option
- * is already in the list and adding another would be two controls for one
- * value. It is also the only one of the three filters whose default is not
- * "everything" — see `DEFAULT_QUEUE`.
+ * The page heading names the view, because the sidebar is where the view is
+ * chosen and this is the only thing on the page that says which one it is.
+ * `all` gets a whole phrase for the reason the sidebar gives it one.
  */
-const HANDLER_ITEMS = TICKET_HANDLERS.map((value) => ({
-  label: TICKET_HANDLER_LABELS[value],
-  value,
-}));
+const VIEW_TITLES: Record<TicketHandler, string> = {
+  ...TICKET_HANDLER_LABELS,
+  all: "All tickets",
+};
 
-/** Same shape the users table uses for `createdAt` — a date, not a timestamp. */
-const formatCreated = (iso: string) => new Date(iso).toLocaleDateString();
+/**
+ * How long an open ticket can wait before its age is drawn in the overdue
+ * colour. A display judgement, not a policy: there is no SLA anywhere in this
+ * codebase, and nothing but this cell reads the number. Five days is past a
+ * working week — long enough that a student has probably written again.
+ */
+const OVERDUE_AFTER_DAYS = 5;
+
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
+/**
+ * An age the eye can compare down a column: "3h", "2d", and a plain date once
+ * a ticket is older than a month, where "47d" stops meaning anything. The full
+ * timestamp is on the cell's `title` for anyone who needs it.
+ */
+function formatAge(iso: string, now: number) {
+  const elapsed = Math.max(0, now - new Date(iso).getTime());
+  if (elapsed < HOUR) return `${Math.max(1, Math.floor(elapsed / MINUTE))}m`;
+  if (elapsed < DAY) return `${Math.floor(elapsed / HOUR)}h`;
+  if (elapsed < 30 * DAY) return `${Math.floor(elapsed / DAY)}d`;
+  return new Date(iso).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
 
 /**
  * Everything that decides which rows are on screen, as one object.
@@ -227,11 +257,7 @@ const columns: ColumnDef<typeof features, TicketSummary, unknown>[] = [
     header: "Status",
     cell: ({ row }) => (
       <div className="flex flex-wrap items-center gap-1.5">
-        <Badge
-          variant={row.original.status === "open" ? "default" : "secondary"}
-        >
-          {row.original.status}
-        </Badge>
+        <StatusBadge status={row.original.status} />
         <AutoResolution ticket={row.original} />
       </div>
     ),
@@ -245,9 +271,7 @@ const columns: ColumnDef<typeof features, TicketSummary, unknown>[] = [
       // that reads like a bug. The accessor above flattens it to "" because
       // that value is never rendered or compared here; Postgres decides where
       // the unclassified rows go.
-      if (category) {
-        return <Badge variant="outline">{CATEGORY_LABELS[category]}</Badge>;
-      }
+      if (category) return <CategoryChip category={category} />;
       // The other reason a category can be missing, and the one the reader
       // cannot otherwise tell from the permanent kind: classification runs
       // after ingestion answers, so a ticket that arrived seconds ago has no
@@ -267,11 +291,7 @@ const columns: ColumnDef<typeof features, TicketSummary, unknown>[] = [
   columnHelper.accessor((row): unknown => row.createdAt, {
     id: "createdAt" satisfies TicketSortKey,
     header: "Created",
-    cell: ({ row }) => (
-      <span className="text-muted-foreground">
-        {formatCreated(row.original.createdAt)}
-      </span>
-    ),
+    cell: ({ row }) => <Age ticket={row.original} />,
   }),
 ];
 
@@ -326,14 +346,6 @@ export function TicketListPage() {
 
   const handleCategoryChange = (value: TicketCategory | "all" | null) => {
     applyFilters({ category: value ?? "all" });
-  };
-
-  // Cleared back to the default rather than to "all", unlike the two above: the
-  // neutral value here is a deliberate choice among three, not the absence of a
-  // filter, and falling back to "all" would quietly un-hide the assistant's
-  // tickets for anyone whose Select got into a null state.
-  const handleHandlerChange = (value: TicketHandler | null) => {
-    applyFilters({ handledBy: value ?? DEFAULT_QUEUE.handledBy });
   };
 
   /**
@@ -592,16 +604,30 @@ export function TicketListPage() {
   });
 
   return (
-    <section className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-2xl font-semibold tracking-tight">Tickets</h2>
+    <section className="space-y-5">
+      <div>
+        <h2 className="text-2xl font-semibold tracking-tight">
+          {VIEW_TITLES[handledBy]}
+        </h2>
+        {/*
+          The view's rule, said once under its name. The sidebar is where the
+          view changes, and without this line a reader in the default view has
+          nothing on the page telling them some tickets are elsewhere.
+        */}
+        <p className="mt-1 text-sm text-muted-foreground">
+          {handledBy === "human"
+            ? "Tickets waiting on a person. The ones the assistant is answering are under Handled by AI."
+            : handledBy === "ai"
+              ? "Tickets the assistant is answering or has answered from the knowledge base."
+              : "Every ticket, whoever is handling it."}
+        </p>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <Label htmlFor="search" className="text-muted-foreground">
-          Search
-        </Label>
-        <div className="relative">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="relative min-w-60 flex-1 sm:max-w-sm">
+          <Label htmlFor="search" className="sr-only">
+            Search
+          </Label>
           <Search
             aria-hidden="true"
             className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground"
@@ -614,8 +640,8 @@ export function TicketListPage() {
             type="search"
             value={searchInput}
             onChange={(event) => setSearchInput(event.target.value)}
-            placeholder="Subject, sender or message…"
-            className="w-64 pr-8 pl-8"
+            placeholder="Search subject, sender or message"
+            className="w-full pr-8 pl-8"
           />
           {searchInput && (
             <button
@@ -629,79 +655,53 @@ export function TicketListPage() {
           )}
         </div>
 
-        <Label htmlFor="status" className="ml-4 text-muted-foreground">
-          Status
-        </Label>
-        <Select
-          items={STATUS_ITEMS}
-          value={status}
-          onValueChange={handleStatusChange}
-        >
-          <SelectTrigger id="status" className="min-w-32">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectGroup>
-              {STATUS_ITEMS.map((item) => (
-                <SelectItem key={item.value} value={item.value}>
-                  {item.label}
-                </SelectItem>
-              ))}
-            </SelectGroup>
-          </SelectContent>
-        </Select>
+        <div className="flex items-center gap-2">
+          <Label htmlFor="status" className="text-muted-foreground">
+            Status
+          </Label>
+          <Select
+            items={STATUS_ITEMS}
+            value={status}
+            onValueChange={handleStatusChange}
+          >
+            <SelectTrigger id="status" className="min-w-32">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {STATUS_ITEMS.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </div>
 
-        <Label htmlFor="category" className="ml-4 text-muted-foreground">
-          Category
-        </Label>
-        <Select
-          items={CATEGORY_ITEMS}
-          value={category}
-          onValueChange={handleCategoryChange}
-        >
-          <SelectTrigger id="category" className="min-w-44">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectGroup>
-              {CATEGORY_ITEMS.map((item) => (
-                <SelectItem key={item.value} value={item.value}>
-                  {item.label}
-                </SelectItem>
-              ))}
-            </SelectGroup>
-          </SelectContent>
-        </Select>
-
-        {/*
-          The queue hides the tickets the assistant is handling, and this is the
-          control that says so and takes it back. Without it those rows would be
-          filtered by a rule with nothing on screen to explain it — which is not
-          a hidden row, it is a lost one, and "the assistant wrote to a student
-          and I cannot see what it said" is the failure this feature would
-          otherwise ship with.
-        */}
-        <Label htmlFor="handled" className="ml-4 text-muted-foreground">
-          Showing
-        </Label>
-        <Select
-          items={HANDLER_ITEMS}
-          value={handledBy}
-          onValueChange={handleHandlerChange}
-        >
-          <SelectTrigger id="handled" className="min-w-40">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectGroup>
-              {HANDLER_ITEMS.map((item) => (
-                <SelectItem key={item.value} value={item.value}>
-                  {item.label}
-                </SelectItem>
-              ))}
-            </SelectGroup>
-          </SelectContent>
-        </Select>
+        <div className="flex items-center gap-2">
+          <Label htmlFor="category" className="text-muted-foreground">
+            Category
+          </Label>
+          <Select
+            items={CATEGORY_ITEMS}
+            value={category}
+            onValueChange={handleCategoryChange}
+          >
+            <SelectTrigger id="category" className="min-w-44">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {CATEGORY_ITEMS.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       {isPageLoading && <TicketsTableSkeleton table={table} />}
@@ -714,61 +714,69 @@ export function TicketListPage() {
       )}
 
       {data && !isPageLoading && tickets.length === 0 && (
-        <Card className="border-dashed">
-          <CardContent className="py-10 text-center">
-            {/*
-              Naming the search rather than "that filter" when one is active:
-              the reader's next move is to edit or clear the term, and being
-              told a filter is at fault sends them to the wrong control.
-            */}
-            <p className="font-medium">
-              {search
-                ? `No tickets match “${search}”`
-                : handledBy === "ai"
-                  ? "The assistant has not handled any tickets"
-                  : "No tickets match that filter"}
-            </p>
-            {/*
-              The default queue hides rows, so an empty one has a second
-              possible cause that no control on screen is set to — and a reader
-              told "no tickets match that filter" while every filter reads
-              "All" is a reader who concludes the queue is broken. Saying which
-              rows are missing, and that Showing is where they are, is the whole
-              reason the wording branches.
-            */}
-            <p className="mt-1 text-sm text-muted-foreground">
-              {search ? (
-                "Searches cover the subject, the sender and the message body."
-              ) : handledBy === "ai" ? (
-                "Tickets appear here once the assistant answers one from the knowledge base."
-              ) : handledBy === "human" ? (
-                <>
-                  Tickets the assistant is answering are hidden — switch{" "}
-                  <strong className="font-medium">Showing</strong> to see them.
-                  New ones appear when email arrives at the support address;
-                  deliver one with <code>bun run email:send</code>.
-                </>
-              ) : (
-                <>
-                  Tickets appear here when email arrives at the support address.
-                  Deliver one with <code>bun run email:send</code>.
-                </>
-              )}
-            </p>
-          </CardContent>
-        </Card>
+        <div className="rounded-lg border border-dashed px-6 py-12 text-center">
+          {/*
+            Naming the search rather than "that filter" when one is active:
+            the reader's next move is to edit or clear the term, and being
+            told a filter is at fault sends them to the wrong control.
+          */}
+          <p className="font-medium">
+            {search
+              ? `No tickets match “${search}”`
+              : handledBy === "ai"
+                ? "The assistant has not handled any tickets"
+                : "No tickets match that filter"}
+          </p>
+          {/*
+            The default view hides rows, so an empty one has a second possible
+            cause that no control on this page is set to — and a reader told
+            "no tickets match that filter" while every filter reads "All" is a
+            reader who concludes the queue is broken. Saying which rows are
+            missing, and which view holds them, is the whole reason the wording
+            branches.
+          */}
+          <p className="mx-auto mt-1 max-w-prose text-sm text-muted-foreground">
+            {search ? (
+              "Searches cover the subject, the sender and the message body."
+            ) : handledBy === "ai" ? (
+              "Tickets appear here once the assistant answers one from the knowledge base."
+            ) : handledBy === "human" ? (
+              <>
+                Tickets the assistant is answering are hidden — open{" "}
+                <strong className="font-medium">Handled by AI</strong> to see
+                them. New ones appear when email arrives at the support address;
+                deliver one with <code>bun run email:send</code>.
+              </>
+            ) : (
+              <>
+                Tickets appear here when email arrives at the support address.
+                Deliver one with <code>bun run email:send</code>.
+              </>
+            )}
+          </p>
+        </div>
       )}
 
       {data && tickets.length > 0 && (
-        <div className="space-y-4">
+        <div className="overflow-hidden rounded-lg border">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <TicketsTableHead table={table} />
               <tbody className="divide-y">
                 {table.getRowModel().rows.map((row) => (
-                  <tr key={row.id}>
+                  <tr
+                    key={row.id}
+                    // The stripe marks work still to do. Drawn on the row's
+                    // first cell rather than as a border on the <tr>, which
+                    // `border-collapse` would merge into the divider.
+                    className={`transition-colors hover:bg-accent/60 ${
+                      row.original.status === "open"
+                        ? "[&>td:first-child]:shadow-[inset_3px_0_0_var(--primary)]"
+                        : ""
+                    }`}
+                  >
                     {row.getAllCells().map((cell) => (
-                      <td key={cell.id} className="py-3 pr-4 last:pr-0">
+                      <td key={cell.id} className={CELL_CLASS}>
                         {flexRender(
                           cell.column.columnDef.cell,
                           cell.getContext(),
@@ -783,14 +791,17 @@ export function TicketListPage() {
 
           <nav
             aria-label="Ticket pages"
-            className="flex flex-wrap items-center justify-between gap-3"
+            className="flex flex-wrap items-center justify-between gap-3 border-t bg-muted/40 px-4 py-2.5"
           >
             {/*
               The range, not just the page number. "Page 3 of 10" tells a reader
               where they are; "21–30 of 100" tells them how much is left, which
               is the question someone working a queue actually has.
             */}
-            <p className="text-sm text-muted-foreground" aria-live="polite">
+            <p
+              className="text-sm tabular-nums text-muted-foreground"
+              aria-live="polite"
+            >
               {firstRow}–{lastRow} of {total}
             </p>
 
@@ -801,7 +812,8 @@ export function TicketListPage() {
                 onClick={() => goToPage(Math.max(0, pageIndex - 1))}
                 disabled={pageIndex === 0}
               >
-                ‹ Prev
+                <ChevronLeft aria-hidden="true" />
+                Prev
               </Button>
               <span className="text-sm tabular-nums text-muted-foreground">
                 Page {pageIndex + 1} of {pageCount}
@@ -814,7 +826,14 @@ export function TicketListPage() {
                 // cannot queue a second fetch and skip a page on arrival.
                 disabled={!canGoNext || isFetchingNextPage}
               >
-                {isFetchingNextPage ? "Loading…" : "Next ›"}
+                {isFetchingNextPage ? (
+                  "Loading…"
+                ) : (
+                  <>
+                    Next
+                    <ChevronRight aria-hidden="true" />
+                  </>
+                )}
               </Button>
             </div>
           </nav>
@@ -823,6 +842,9 @@ export function TicketListPage() {
     </section>
   );
 }
+
+/** Shared by the real rows and the skeleton so the columns cannot drift. */
+const CELL_CLASS = "px-4 py-3 align-top";
 
 type TicketTable = ReactTable<typeof features, TicketSummary>;
 
@@ -842,13 +864,93 @@ function SubjectCell({ ticket }: { ticket: TicketSummary }) {
   const location = useLocation();
 
   return (
-    <Link
-      to={`/tickets/${ticket.id}`}
-      state={{ from: `${location.pathname}${location.search}` }}
-      className="rounded-sm font-medium underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
+    <div className="max-w-md min-w-48">
+      <Link
+        to={`/tickets/${ticket.id}`}
+        state={{ from: `${location.pathname}${location.search}` }}
+        className="rounded-sm font-medium underline-offset-4 outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
+      >
+        {ticket.subject}
+      </Link>
+      {/*
+        The opening of the email, because a subject is often not enough to
+        triage by ("cant login"). Outside the link so the link's accessible
+        name stays the subject alone.
+      */}
+      {ticket.preview && (
+        <p className="mt-0.5 truncate text-muted-foreground">
+          {ticket.preview}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Open is the one status that asks something of the reader, so it is the one
+ * drawn in the accent; resolved and closed recede. The word itself stays the
+ * status value — it is what the Status filter lists.
+ */
+function StatusBadge({ status }: { status: TicketStatus }) {
+  const tone =
+    status === "open"
+      ? "bg-primary/10 text-primary"
+      : status === "resolved"
+        ? "bg-secondary text-secondary-foreground"
+        : "text-muted-foreground";
+
+  return (
+    <span
+      className={`inline-flex h-5 items-center rounded-md border border-transparent px-2 text-xs font-medium ${tone} ${status === "closed" ? "border-border" : ""}`}
     >
-      {ticket.subject}
-    </Link>
+      {status}
+    </span>
+  );
+}
+
+/**
+ * Refund requests get the caution tint and the other categories do not: it is
+ * the one category with money attached and, usually, a deadline in the
+ * student's mind. Colouring all three would make colour mean "a category",
+ * which the text already says.
+ */
+function CategoryChip({ category }: { category: TicketCategory }) {
+  return (
+    <span
+      className={`inline-flex h-5 items-center rounded-md px-2 text-xs whitespace-nowrap ${
+        category === "refund_request"
+          ? "bg-caution text-caution-foreground"
+          : "bg-secondary text-secondary-foreground"
+      }`}
+    >
+      {CATEGORY_LABELS[category]}
+    </span>
+  );
+}
+
+/**
+ * How long ago the ticket arrived, in the overdue colour once an open one has
+ * waited past `OVERDUE_AFTER_DAYS`. Only open tickets: a resolved ticket from
+ * last month is not late, it is finished.
+ *
+ * `now` is taken once, on mount, rather than on every render — a clock read
+ * during render makes the output impure, and an age that is a few minutes
+ * stale on a page someone has left open is not worth a timer.
+ */
+function Age({ ticket }: { ticket: TicketSummary }) {
+  const [now] = useState(() => Date.now());
+  const overdue =
+    ticket.status === "open" &&
+    now - new Date(ticket.createdAt).getTime() > OVERDUE_AFTER_DAYS * DAY;
+
+  return (
+    <time
+      dateTime={ticket.createdAt}
+      title={new Date(ticket.createdAt).toLocaleString()}
+      className={`whitespace-nowrap tabular-nums ${overdue ? "font-medium text-overdue" : "text-muted-foreground"}`}
+    >
+      {formatAge(ticket.createdAt, now)}
+    </time>
   );
 }
 
@@ -940,7 +1042,7 @@ function TicketsTableHead({ table }: { table: TicketTable }) {
       {table.getHeaderGroups().map((headerGroup) => (
         <tr
           key={headerGroup.id}
-          className="border-b text-left text-muted-foreground"
+          className="border-b bg-muted/40 text-left text-xs text-muted-foreground"
         >
           {headerGroup.headers.map((header) => {
             const direction = header.column.getIsSorted();
@@ -955,7 +1057,7 @@ function TicketsTableHead({ table }: { table: TicketTable }) {
               <th
                 key={header.id}
                 scope="col"
-                className="py-2 pr-4 font-medium last:pr-0"
+                className="px-4 py-2 font-medium"
                 aria-sort={
                   direction === "asc"
                     ? "ascending"
@@ -1002,7 +1104,11 @@ function TicketsTableSkeleton({ table }: { table: TicketTable }) {
   const widths = ["w-56", "w-40", "w-16", "w-28", "w-20"];
 
   return (
-    <div className="overflow-x-auto" aria-busy="true" aria-live="polite">
+    <div
+      className="overflow-x-auto rounded-lg border"
+      aria-busy="true"
+      aria-live="polite"
+    >
       <span className="sr-only">Loading tickets…</span>
       <table className="w-full text-sm">
         <TicketsTableHead table={table} />
@@ -1010,7 +1116,7 @@ function TicketsTableSkeleton({ table }: { table: TicketTable }) {
           {Array.from({ length: 5 }, (_, rowIndex) => (
             <tr key={rowIndex}>
               {widths.map((width, cellIndex) => (
-                <td key={cellIndex} className="py-3 pr-4 last:pr-0">
+                <td key={cellIndex} className={CELL_CLASS}>
                   <Skeleton className={`h-4 ${width}`} />
                 </td>
               ))}

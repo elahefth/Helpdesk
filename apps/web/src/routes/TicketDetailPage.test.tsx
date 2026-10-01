@@ -123,6 +123,7 @@ function ticket(overrides: Partial<TicketDetail> = {}): TicketDetail {
     subject: "Cannot log in to the course portal",
     studentName: "Ada Student",
     studentEmail: "ada.student@example.com",
+    preview: "I have reset my password twice.",
     status: "open",
     category: "technical",
     classification: "skipped",

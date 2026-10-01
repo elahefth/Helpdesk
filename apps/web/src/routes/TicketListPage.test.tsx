@@ -67,6 +67,7 @@ function ticketRow(overrides: Partial<TicketSummary> = {}): TicketSummary {
     subject: "Cannot log in to the course portal",
     studentName: "Ada Student",
     studentEmail: "ada.student@example.com",
+    preview: "I have reset my password twice and still cannot get in.",
     status: "open",
     category: null,
     classification: "skipped",
@@ -344,25 +345,42 @@ describe("TicketListPage", () => {
     expect(requestedUrls[0]).toBe("/api/tickets");
   });
 
-  // The control that takes the hidden rows back. Without it they are filtered
-  // by a rule with nothing on screen to explain it, which is a lost row rather
-  // than a hidden one.
-  it("asks for the assistant's tickets when Showing changes", async () => {
-    responders.push(jsonResponse(pageOf([ticketRow()])));
-    renderList();
-    await screen.findByText("Cannot log in to the course portal");
-
+  /**
+   * The views are chosen in the sidebar, so this page is told which one by the
+   * URL alone — and its heading is then the only thing on the page naming the
+   * rule. Both halves are asserted: the request that takes the hidden rows
+   * back, and the title that says which rows these are.
+   */
+  it("asks for the assistant's tickets under the Handled by AI view", async () => {
     responders.push(
       jsonResponse(pageOf([ticketRow({ autoResolution: "resolved" })])),
     );
-    await userEvent.click(screen.getByRole("combobox", { name: /showing/i }));
-    await userEvent.click(
-      await screen.findByRole("option", { name: "Handled by AI" }),
-    );
 
+    renderList("/?handled=ai");
+
+    expect(
+      await screen.findByRole("heading", { name: "Handled by AI" }),
+    ).toBeDefined();
     await waitFor(() => {
       expect(requestedUrls).toContain("/api/tickets?handledBy=ai");
     });
+  });
+
+  it("shows the opening of the email under the subject", async () => {
+    responders.push(jsonResponse(pageOf([ticketRow()])));
+
+    renderList();
+
+    const row = await screen.findByRole("row", { name: /Cannot log in/ });
+    expect(
+      within(row).getByText(/I have reset my password twice/),
+    ).toBeDefined();
+    // Outside the link, so the link is still named by the subject alone.
+    expect(
+      within(row).getByRole("link", {
+        name: "Cannot log in to the course portal",
+      }),
+    ).toBeDefined();
   });
 
   /**
@@ -419,7 +437,7 @@ describe("TicketListPage", () => {
    * "no tickets match that filter" next to three filters reading All is how a
    * reader concludes the queue is broken.
    */
-  it("points at Showing when the default queue is empty", async () => {
+  it("points at Handled by AI when the default queue is empty", async () => {
     responders.push(jsonResponse(pageOf([])));
 
     renderList();
@@ -605,7 +623,7 @@ describe("TicketListPage sorting", () => {
       .getAllByRole("row")
       // Drop the header row.
       .slice(1)
-      .map((row) => row.querySelector("td")?.textContent);
+      .map((row) => row.querySelector("td a")?.textContent);
     expect(subjects).toEqual([
       "Refund for the January cohort",
       "Cannot log in to the course portal",

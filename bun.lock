@@ -44,7 +44,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@base-ui/react": "^1.7.0",
-        "@fontsource-variable/geist": "^5.3.0",
+        "@fontsource-variable/onest": "^5.3.1",
         "@helpdesk/shared": "workspace:*",
         "@hookform/resolvers": "^5.9.0",
         "@tanstack/react-query": "^5.101.4",
@@ -268,7 +268,7 @@
 
     "@floating-ui/utils": ["@floating-ui/utils@0.2.12", "", {}, "sha512-HpCo8tmWzLVad5s2d19EhAz5zqrrQ6s69qd6moPMQvkOuSwDT1YgRfWSVuc4ennqrgv3OHppiOGMQ7oC13yIww=="],
 
-    "@fontsource-variable/geist": ["@fontsource-variable/geist@5.3.0", "", {}, "sha512-j0m+vLQuG5XAYoHtGCVu0spvlGreR3EzpECUVzkFmI1mTVnAO38l/NEPDCFgZ177JxzYJCLSmTQibIiYPilGrA=="],
+    "@fontsource-variable/onest": ["@fontsource-variable/onest@5.3.1", "", {}, "sha512-xaaw6G4HDB2/RczsWLD/2bnib4ykmQlTlBUN3GOEOiyErilZukQWVJG95h9zwAy0i8KY+QzDa+COPfqhI72Acw=="],
 
     "@helpdesk/api": ["@helpdesk/api@workspace:apps/api"],
 

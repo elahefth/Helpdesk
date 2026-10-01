@@ -1,7 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { ticketDetailSchema } from "@helpdesk/shared";
+import { TICKET_PREVIEW_LENGTH, ticketDetailSchema } from "@helpdesk/shared";
 import type { ticket, user } from "../db/schema.ts";
-import { toTicketDetail, toTicketSummary } from "./ticket-mappers.ts";
+import {
+  ticketPreview,
+  toTicketDetail,
+  toTicketSummary,
+} from "./ticket-mappers.ts";
 
 /**
  * The row-to-wire projection, which fails in a place a long way from here when
@@ -93,5 +97,35 @@ describe("toTicketDetail", () => {
     const row = { ...ROW };
 
     expect(toTicketDetail(row, null)).toMatchObject(toTicketSummary(row));
+  });
+});
+
+describe("ticketPreview", () => {
+  it("flattens the greeting's line breaks into one line", () => {
+    expect(ticketPreview("Hi,\n\nI cannot log in.\n\nAda")).toBe(
+      "Hi, I cannot log in. Ada",
+    );
+  });
+
+  it("cuts a long email at the preview length", () => {
+    const preview = ticketPreview("word ".repeat(100));
+
+    expect(preview.length).toBeLessThanOrEqual(TICKET_PREVIEW_LENGTH);
+    expect(preview.endsWith(" ")).toBe(false);
+  });
+
+  // Cut by UTF-16 unit, the emoji straddling the boundary would leave a lone
+  // surrogate, which the browser renders as a replacement box.
+  it("never splits a character in half", () => {
+    const body = `${"a".repeat(TICKET_PREVIEW_LENGTH - 1)}😀 tail`;
+    const preview = ticketPreview(body);
+
+    expect(preview.endsWith("😀")).toBe(true);
+  });
+
+  it("is on the summary the list sends", () => {
+    expect(toTicketSummary({ ...ROW }).preview).toBe(
+      "I have reset my password twice.",
+    );
   });
 });
