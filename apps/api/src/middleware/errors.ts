@@ -63,10 +63,15 @@ export class HttpError extends Error {
 }
 
 export function notFoundHandler(req: Request, res: Response): void {
+  // Not `req.path`: every /api router is mounted at "/api", and a request that
+  // falls out of one reaches here with that prefix still stripped, so GET /api
+  // was reported as "No route for GET /". `originalUrl` is the path as sent,
+  // minus the query string, which may carry a search term.
+  const path = req.originalUrl.split("?", 1)[0];
   const body: ApiError = {
     error: {
       code: "not_found",
-      message: `No route for ${req.method} ${req.path}`,
+      message: `No route for ${req.method} ${path}`,
       requestId: req.id,
     },
   };

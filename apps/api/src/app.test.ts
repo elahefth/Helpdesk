@@ -554,6 +554,11 @@ describe("users (admin only)", () => {
     expect((await body(res)).error.code).toBe("not_found");
   });
 
+  it("names the full path in a 404 under /api, not the router-relative one", async () => {
+    const res = await getAuthedAs("agent", "/api/nope?q=secret");
+    expect((await body(res)).error.message).toBe("No route for GET /api/nope");
+  });
+
   it("admits an admin as far as the database check", async () => {
     const res = await getAuthedAs("admin", "/api/users");
     expect(res.status).toBe(503);
