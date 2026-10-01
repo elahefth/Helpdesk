@@ -1056,7 +1056,7 @@ v9 is not v8 with a new version number, and three of its differences bit during 
 
 These guards hide UI; they are not the security boundary — the API is. Any admin-only endpoint needs its own server-side role check: `requireRole("admin")` from `apps/api/src/middleware/require-role.ts`, attached **to the route** rather than via `router.use` (a pathless `use` on a router mounted at `/api` would turn every unmatched `/api/*` into a 403 and make `notFoundHandler` unreachable — there is a regression test for exactly that).
 
-The auth client sets no `baseURL`, so requests stay same-origin: in dev Vite proxies `/api`, `/healthz`, and `/readyz` to :3000, and in production the API serves the built SPA. The session cookie therefore never needs a cross-site exemption. `inferAdditionalFields` teaches the client about `role`, using values from `@helpdesk/shared` rather than `typeof auth` because `apps/web` must not depend on `apps/api`.
+The auth client sets no `baseURL`, so requests stay same-origin: in dev Vite proxies `/api`, `/healthz`, and `/readyz` to :3000, and in production the API serves the built SPA (`apps/api/src/spa.ts`, mounted only when `NODE_ENV=production`) — see Deployment below. The session cookie therefore never needs a cross-site exemption. `inferAdditionalFields` teaches the client about `role`, using values from `@helpdesk/shared` rather than `typeof auth` because `apps/web` must not depend on `apps/api`.
 
 The proxy target is `API_PROXY_TARGET`, defaulting to :3000. Only the E2E suite overrides it — do not hardcode a port back into `vite.config.ts`.
 
@@ -1079,6 +1079,41 @@ Keep that agent in sync when the harness changes: its fixture table and its list
 - **`.env.test` is committed** — every value in it is throwaway. Its `WEB_ORIGIN` must stay byte-identical to `baseURL` in `playwright.config.ts`: it feeds both the CORS allowlist and Better Auth's `trustedOrigins`, and both compare the `Origin` header as a string, so `localhost` and `127.0.0.1` are not interchangeable.
 - **Sessions come from the `setup` project, not the login form.** `e2e/auth.setup.ts` signs in over `/api/auth/sign-in/email` and saves cookies to `e2e/playwright/.auth/*.json`; the `chromium` project loads the admin one by default. Going through `LoginPage.tsx` would make every test's setup break whenever that markup changed. Note that project carries its own `testDir` — it lives beside the config, not in `tests/`.
 - **`workers: 1`**, because every worker shares the one database. Raising it means per-worker schemas, not a flag flip.
+
+## Deployment (Railway)
+
+`DEPLOY.md` is the runbook; this is what to know before changing it. One
+service, built from the root `Dockerfile` and configured by `railway.json`,
+plus Railway Postgres.
+
+- **The API serves the SPA, and one origin is the point.** `spa.ts` is mounted
+  after every API router and only in production. It answers client routes with
+  `index.html` (`no-cache`, since it names the asset hashes) and serves
+  `/assets` as immutable. It refuses three kinds of path rather than answering
+  with the page: `/api/*`, the health routes, and anything with a file
+  extension. A stale tab asking for last deploy's `index-<hash>.js` must get a
+  404, not HTML fed to a script tag. The route is `/{*splat}`, not `/*splat`:
+  Express 5's bare splat needs a segment, so `/` would 404.
+- **No inline scripts.** helmet's default CSP is `script-src 'self'`, so the
+  dark-mode bootstrap lives in `apps/web/public/theme.js`, not inline in
+  `index.html`. An inline `<script>` added back there will work in dev and
+  silently do nothing in production.
+- **Migrations run as Railway's pre-deploy command** via `src/migrate.ts`,
+  using drizzle-orm's migrator rather than drizzle-kit. drizzle-kit is a
+  devDependency that is not in the image, and `db:migrate` loads `../../.env`.
+  Both migrators record progress in `drizzle.__drizzle_migrations`, so either
+  one sees the other's work.
+- **`RAILWAY_PUBLIC_DOMAIN` defaults both `WEB_ORIGIN` and `BETTER_AUTH_URL`**
+  (`withPlatformDefaults` in `env.ts`), and explicit values win, which is what
+  a custom domain needs. Production refuses to boot if either still names
+  `localhost`, because that deploy serves the login page and rejects every
+  sign-in with `INVALID_ORIGIN`.
+- **The image runs source, not a bundle.** Bun executes TypeScript,
+  `@helpdesk/shared` is consumed as source, and `apps/api` needs `drizzle/` and
+  `knowledge-base.md` beside it. The runtime stage installs with
+  `--production`. Every workspace's `package.json` is copied before install,
+  e2e's included, or `--frozen-lockfile` refuses. Bun is pinned to the
+  lockfile's version through `BUN_VERSION`.
 
 ## Conventions
 

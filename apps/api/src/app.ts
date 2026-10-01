@@ -2,7 +2,7 @@ import express, { type Express } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import { toNodeHandler } from "better-auth/node";
-import { env } from "./env.ts";
+import { env, isProduction } from "./env.ts";
 import { createAuth, type Auth } from "./auth.ts";
 import { getDb } from "./db/client.ts";
 import { requestContext } from "./middleware/request-context.ts";
@@ -12,6 +12,8 @@ import { healthRouter } from "./routes/health.ts";
 import { createInboundEmailRouter } from "./routes/inbound-email.ts";
 import { createTicketsRouter } from "./routes/tickets.ts";
 import { createUsersRouter } from "./routes/users.ts";
+import { logger } from "./logger.ts";
+import { createSpaRouter, resolveWebDist } from "./spa.ts";
 import { createTicketJobs, type TicketJobs } from "./ticket-jobs.ts";
 
 export interface CreateAppOptions {
@@ -35,8 +37,9 @@ export interface CreateAppOptions {
 export function createApp(options: CreateAppOptions = {}): Express {
   const app = express();
 
-  // Behind Render/Fly this is required for correct client IPs and secure
-  // cookie handling once sessions land in Phase 4.
+  // Railway (like Render and Fly) terminates TLS at one proxy in front of the
+  // container. Trusting exactly one hop is what makes `req.ip` the client and
+  // `req.secure` true, without letting a client spoof X-Forwarded-For.
   app.set("trust proxy", 1);
   app.disable("x-powered-by");
 
@@ -87,6 +90,17 @@ export function createApp(options: CreateAppOptions = {}): Express {
     createTicketsRouter(db),
     createUsersRouter(db, auth),
   );
+
+  // The SPA, after every API router so it can only ever answer what they did
+  // not. Production only: in dev Vite serves the page on :5173, and a stale
+  // `apps/web/dist` answering on :3000 would be a second, older copy of the
+  // app one typo away from the real one.
+  if (isProduction) {
+    const dist = resolveWebDist(env.WEB_DIST_PATH);
+    const spa = createSpaRouter(dist);
+    if (spa) app.use(spa);
+    else logger.warn({ dist }, "no built SPA found — serving the API only");
+  }
 
   // Order matters: 404 catch-all, then the error handler, both last.
   app.use(notFoundHandler);

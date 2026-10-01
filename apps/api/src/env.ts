@@ -84,6 +84,13 @@ const envSchema = z
     KNOWLEDGE_BASE_PATH: z.string().trim().min(1).default("knowledge-base.md"),
 
     /**
+     * The built SPA the API serves in production — see `spa.ts`. Relative
+     * paths resolve from the API package, like `KNOWLEDGE_BASE_PATH`, so the
+     * default finds `apps/web/dist` from any working directory.
+     */
+    WEB_DIST_PATH: z.string().trim().min(1).default("../web/dist"),
+
+    /**
      * Which model runs — a comma-separated preference order, not one id, and
      * shared by all three features that call one.
      *
@@ -150,6 +157,28 @@ const envSchema = z
       });
     }
 
+    /**
+     * The two URLs that have to name the public address, and whose defaults
+     * name a developer's laptop. Both compare as strings — WEB_ORIGIN against
+     * the browser's `Origin` header for CORS and Better Auth's
+     * `trustedOrigins`, BETTER_AUTH_URL as the base every auth cookie and
+     * redirect is built from — so a deploy that kept either default boots,
+     * serves the login page, and refuses every sign-in with `INVALID_ORIGIN`.
+     * Refusing to boot says the true thing instead.
+     */
+    if (value.NODE_ENV === "production") {
+      for (const key of ["WEB_ORIGIN", "BETTER_AUTH_URL"] as const) {
+        if (new URL(value[key]).hostname === "localhost") {
+          ctx.addIssue({
+            code: "custom",
+            path: [key],
+            message:
+              "points at localhost in production — set it to the public URL, or generate a Railway domain so RAILWAY_PUBLIC_DOMAIN supplies one",
+          });
+        }
+      }
+    }
+
     if (value.NODE_ENV === "production" && !value.INBOUND_EMAIL_SECRET) {
       ctx.addIssue({
         code: "custom",
@@ -160,7 +189,31 @@ const envSchema = z
     }
   });
 
-const parsed = envSchema.safeParse(process.env);
+/**
+ * On Railway the public address is already known: the platform sets
+ * `RAILWAY_PUBLIC_DOMAIN` on a service once it has a domain. The SPA is served
+ * from the API (see `spa.ts`), so the page's origin and the auth base URL are
+ * the same address, and both default to it here — one fewer pair of variables
+ * to keep in step with a domain that can change.
+ *
+ * Only ever a default. Anything set explicitly wins, which is what a custom
+ * domain needs: `RAILWAY_PUBLIC_DOMAIN` keeps naming the *.up.railway.app one.
+ */
+export function withPlatformDefaults(
+  source: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const domain = source.RAILWAY_PUBLIC_DOMAIN?.trim();
+  if (!domain) return source;
+
+  const publicUrl = `https://${domain}`;
+  return {
+    ...source,
+    WEB_ORIGIN: source.WEB_ORIGIN || publicUrl,
+    BETTER_AUTH_URL: source.BETTER_AUTH_URL || publicUrl,
+  };
+}
+
+const parsed = envSchema.safeParse(withPlatformDefaults(process.env));
 
 if (!parsed.success) {
   console.error("Invalid environment configuration:");

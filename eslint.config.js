@@ -35,7 +35,9 @@ export default tseslint.config(
     },
   },
   {
-    files: ["apps/web/**/*.{ts,tsx}"],
+    // public/*.js is served as-is in the browser (theme.js), so it takes the
+    // browser globals too.
+    files: ["apps/web/**/*.{ts,tsx}", "apps/web/public/**/*.js"],
     plugins: { "react-hooks": reactHooks },
     languageOptions: {
       globals: { ...globals.browser },
